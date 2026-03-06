@@ -2,9 +2,14 @@ import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { Player, Food, GameState, Vector2 } from './src/shared/types.js';
 
-const PORT = 3000;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const DIST_DIR = path.join(__dirname, 'dist');
+const PORT = Number(process.env.PORT) || 3000;
 const TICK_RATE = 30; // 30 updates per second
 const WORLD_SIZE = 3000;
 const INITIAL_SNAKE_LENGTH = 50;
@@ -248,7 +253,10 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    app.use(express.static('dist'));
+    app.use(express.static(DIST_DIR));
+    app.get('*', (_req, res) => {
+      res.sendFile(path.join(DIST_DIR, 'index.html'));
+    });
   }
 
   httpServer.listen(PORT, '0.0.0.0', () => {
