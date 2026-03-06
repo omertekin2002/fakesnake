@@ -1,0 +1,5 @@
+{
+  "name": "Multiplayer Snake.io",
+  "description": "A real-time multiplayer snake game clone.",
+  "requestFramePermissions": []
+}
