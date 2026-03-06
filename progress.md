@@ -9,4 +9,8 @@ Original prompt: Can you add a start screen so the player isn't immidiately put 
 - Reworked the menu to use the actual game grid and floating food blobs instead of copy-heavy UI cards.
 - Simplified the start screen overlay to just the game title and a basic start button.
 - Revalidated in-browser: initial state stays in `menu`, the DOM only shows title + button, and `Start Game` still enters `playing`.
+- Added an in-game `Exit` button and an `Escape` shortcut that both return the player to the start screen.
+- Revalidated in-browser: both the on-screen `Exit` button and the `Escape` key return from live play back to `menu`.
+- Moved the in-game score label lower so it no longer overlaps the top-left `Exit` button.
+- Moved the in-game score label to the bottom-left corner to fully separate it from the top-left `Exit` button.
 - TODO: If we later want keyboard-friendly menu navigation, add an Enter key handler for `Start Game`.

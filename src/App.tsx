@@ -188,6 +188,31 @@ export default function App() {
     return () => window.removeEventListener('mousemove', handleMouseMove);
   }, [myId, phase, windowSize.height, windowSize.width]);
 
+  const returnToMenu = () => {
+    socketRef.current?.disconnect();
+    socketRef.current = null;
+    setGameState(null);
+    setMyId(null);
+    setScore(0);
+    setPhase('menu');
+  };
+
+  useEffect(() => {
+    if (phase === 'menu') {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        returnToMenu();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [phase]);
+
   useEffect(() => {
     if (!canvasRef.current) {
       return;
@@ -324,7 +349,7 @@ export default function App() {
       ctx.fillStyle = 'white';
       ctx.font = '20px Arial';
       ctx.textAlign = 'left';
-      ctx.fillText(`Score: ${me.score}`, 20, 30);
+      ctx.fillText(`Score: ${me.score}`, 20, windowSize.height - 24);
 
       const sortedPlayers = (Object.values(gameState.players) as Player[])
         .sort((a, b) => b.score - a.score)
@@ -355,15 +380,6 @@ export default function App() {
     setScore(0);
     setPhase('connecting');
     setSessionVersion((value) => value + 1);
-  };
-
-  const returnToMenu = () => {
-    socketRef.current?.disconnect();
-    socketRef.current = null;
-    setGameState(null);
-    setMyId(null);
-    setScore(0);
-    setPhase('menu');
   };
 
   return (
@@ -399,6 +415,15 @@ export default function App() {
               Starting...
             </div>
           </div>
+        )}
+
+        {(phase === 'playing' || phase === 'connecting') && (
+          <button
+            onClick={returnToMenu}
+            className="absolute left-5 top-5 rounded-md border border-white/15 bg-black/40 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-black/60"
+          >
+            Exit
+          </button>
         )}
 
         {phase === 'dead' && (
