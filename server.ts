@@ -4,7 +4,7 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { Player, Food, GameState, Vector2 } from './src/shared/types.js';
+import { Player, Food, GameState, Vector2, DeltaUpdate } from './src/shared/types.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -33,32 +33,39 @@ const state: GameState = {
   worldSize: WORLD_SIZE,
 };
 
+let foodIdCounter = 0;
+
 // Helper functions
 const randomPosition = (): Vector2 => ({
   x: Math.random() * WORLD_SIZE,
   y: Math.random() * WORLD_SIZE,
 });
 
-const generateId = () => Math.random().toString(36).substring(2, 9);
+const generateFoodId = () => `f${foodIdCounter++}`;
 
 const randomColor = () => {
   const hue = Math.floor(Math.random() * 360);
   return `hsl(${hue}, 80%, 60%)`;
 };
 
-const spawnFood = (count: number) => {
+// Delta-aware food spawning: returns the newly created Food items
+const spawnFood = (count: number): Food[] => {
+  const spawned: Food[] = [];
   for (let i = 0; i < count; i++) {
-    const id = generateId();
-    state.foods[id] = {
+    const id = generateFoodId();
+    const food: Food = {
       id,
       position: randomPosition(),
       value: Math.floor(Math.random() * 5) + 1,
       color: randomColor(),
     };
+    state.foods[id] = food;
+    spawned.push(food);
   }
+  return spawned;
 };
 
-// Initial food
+// Initial food (no need to track delta for these — clients get full state on init)
 spawnFood(FOOD_COUNT);
 
 io.on('connection', (socket) => {
@@ -75,7 +82,7 @@ io.on('connection', (socket) => {
     });
   }
 
-  state.players[socket.id] = {
+  const newPlayer: Player = {
     id: socket.id,
     name: `Player ${Math.floor(Math.random() * 1000)}`,
     color: randomColor(),
@@ -86,8 +93,15 @@ io.on('connection', (socket) => {
     isDead: false,
   };
 
+  state.players[socket.id] = newPlayer;
+
+  // New client gets the full state snapshot
   socket.emit('init', { id: socket.id, state });
-  io.emit('playerJoined', state.players[socket.id]);
+
+  // Other clients will learn about this player via the next delta tick
+  // (newPlayers array), so no separate broadcast needed here.
+  // We store the player reference so the next tick picks it up as a newPlayer.
+  pendingNewPlayers.push(newPlayer);
 
   socket.on('input', (targetDirection: Vector2) => {
     const player = state.players[socket.id];
@@ -106,9 +120,13 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     console.log(`Player disconnected: ${socket.id}`);
     delete state.players[socket.id];
-    io.emit('playerLeft', socket.id);
+    pendingRemovedPlayerIds.push(socket.id);
   });
 });
+
+// Pending queues for events that happen between ticks
+let pendingNewPlayers: Player[] = [];
+let pendingRemovedPlayerIds: string[] = [];
 
 let lastTime = Date.now();
 
@@ -117,10 +135,24 @@ const updateGame = () => {
   const dt = (now - lastTime) / 1000;
   lastTime = now;
 
+  // Build delta for this tick
+  const delta: DeltaUpdate = {
+    playerUpdates: {},
+    newPlayers: [...pendingNewPlayers],
+    removedPlayerIds: [...pendingRemovedPlayerIds],
+    newFoods: [],
+    removedFoodIds: [],
+  };
+
+  // Clear pending queues
+  pendingNewPlayers = [];
+  pendingRemovedPlayerIds = [];
+
   // Maintain food count
   const currentFoodCount = Object.keys(state.foods).length;
   if (currentFoodCount < FOOD_COUNT) {
-    spawnFood(Math.min(FOOD_SPAWN_RATE, FOOD_COUNT - currentFoodCount));
+    const spawned = spawnFood(Math.min(FOOD_SPAWN_RATE, FOOD_COUNT - currentFoodCount));
+    delta.newFoods.push(...spawned);
   }
 
   // Update players
@@ -164,7 +196,6 @@ const updateGame = () => {
     player.segments.unshift(newHead);
 
     // Check food collision
-    let ateFood = false;
     for (const foodId in state.foods) {
       const food = state.foods[foodId];
       const dx = newHead.x - food.position.x;
@@ -175,18 +206,27 @@ const updateGame = () => {
       if (distSq < 400) { // 20px radius
         player.score += food.value;
         delete state.foods[foodId];
-        ateFood = true;
-        io.emit('foodEaten', foodId);
+        delta.removedFoodIds.push(foodId);
       }
     }
 
     // Determine target length based on score
     const targetLength = INITIAL_SNAKE_LENGTH + Math.floor(player.score * 2);
 
-    // Remove tail if we didn't eat and we are at target length
+    // Remove tail if we are over target length
+    let removedTail = false;
     if (player.segments.length > targetLength) {
       player.segments.pop();
+      removedTail = true;
     }
+
+    // Record this player's tick update in the delta
+    delta.playerUpdates[playerId] = {
+      newHead,
+      removeTail: removedTail,
+      score: player.score,
+      velocity: { ...player.velocity },
+    };
 
     // Check collision with other players
     for (const otherId in state.players) {
@@ -203,20 +243,20 @@ const updateGame = () => {
         // Collision radius for segments
         if (distSq < 225) { // 15px radius
           player.isDead = true;
-          io.emit('playerDied', playerId);
+          delta.removedPlayerIds.push(playerId);
           
           // Spawn food where player died
           player.segments.forEach((seg, index) => {
             if (index % 2 === 0) { // Don't spawn too much food
-              const id = generateId();
-              const newFood = {
+              const id = generateFoodId();
+              const newFood: Food = {
                 id,
                 position: { ...seg },
                 value: 3,
                 color: player.color,
               };
               state.foods[id] = newFood;
-              io.emit('foodSpawned', newFood);
+              delta.newFoods.push(newFood);
             }
           });
           break;
@@ -226,15 +266,15 @@ const updateGame = () => {
     }
   }
 
-  // Remove dead players
+  // Remove dead players from server state
   for (const playerId in state.players) {
     if (state.players[playerId].isDead) {
       delete state.players[playerId];
     }
   }
 
-  // Broadcast state
-  io.emit('update', state);
+  // Broadcast delta instead of full state
+  io.emit('delta', delta);
 };
 
 setInterval(updateGame, 1000 / TICK_RATE);

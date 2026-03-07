@@ -1,6 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { io, Socket } from 'socket.io-client';
-import { GameState, Player } from './shared/types';
+import { GameState, Player, DeltaUpdate } from './shared/types';
 
 const WORLD_SIZE = 3000;
 const GRID_SIZE = 50;
@@ -87,12 +87,53 @@ const drawFoodBlob = (
   ctx.restore();
 };
 
+// Apply a DeltaUpdate to a local GameState (mutates in place)
+const applyDelta = (localState: GameState, delta: DeltaUpdate): void => {
+  // Add new players
+  for (const player of delta.newPlayers) {
+    localState.players[player.id] = player;
+  }
+
+  // Apply per-player tick updates (head movement, tail removal, score, velocity)
+  for (const playerId in delta.playerUpdates) {
+    const player = localState.players[playerId];
+    if (!player) continue;
+
+    const update = delta.playerUpdates[playerId];
+    player.segments.unshift(update.newHead);
+    if (update.removeTail) {
+      player.segments.pop();
+    }
+    player.score = update.score;
+    player.velocity = update.velocity;
+  }
+
+  // Remove dead/disconnected players
+  for (const id of delta.removedPlayerIds) {
+    delete localState.players[id];
+  }
+
+  // Add new food
+  for (const food of delta.newFoods) {
+    localState.foods[food.id] = food;
+  }
+
+  // Remove eaten food
+  for (const id of delta.removedFoodIds) {
+    delete localState.foods[id];
+  }
+};
+
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const socketRef = useRef<Socket | null>(null);
   const menuFoodsRef = useRef<MenuFood[]>([]);
-  const [gameState, setGameState] = useState<GameState | null>(null);
-  const [myId, setMyId] = useState<string | null>(null);
+
+  // Game state lives in a ref — no React re-renders per tick
+  const gameStateRef = useRef<GameState | null>(null);
+  const myIdRef = useRef<string | null>(null);
+
+  // UI-level state that needs React renders (phase changes, score display in death screen)
   const [score, setScore] = useState(0);
   const [phase, setPhase] = useState<GamePhase>('menu');
   const [sessionVersion, setSessionVersion] = useState(0);
@@ -112,21 +153,23 @@ export default function App() {
   }, [windowSize.height, windowSize.width]);
 
   useEffect(() => {
-    window.render_game_to_text = () =>
-      JSON.stringify({
+    window.render_game_to_text = () => {
+      const gs = gameStateRef.current;
+      return JSON.stringify({
         mode: phase,
-        myId,
+        myId: myIdRef.current,
         score,
-        players: gameState ? Object.keys(gameState.players).length : 0,
-        foods: gameState ? Object.keys(gameState.foods).length : 0,
+        players: gs ? Object.keys(gs.players).length : 0,
+        foods: gs ? Object.keys(gs.foods).length : 0,
         viewport: windowSize,
         coordinates: 'origin at top-left, +x right, +y down',
       });
+    };
 
     return () => {
       delete window.render_game_to_text;
     };
-  }, [gameState, myId, phase, score, windowSize]);
+  }, [phase, score, windowSize]);
 
   useEffect(() => {
     if (sessionVersion === 0) {
@@ -137,17 +180,21 @@ export default function App() {
     socketRef.current = newSocket;
 
     newSocket.on('init', (data: { id: string; state: GameState }) => {
-      setMyId(data.id);
-      setGameState(data.state);
+      myIdRef.current = data.id;
+      gameStateRef.current = data.state;
       setPhase('playing');
     });
 
-    newSocket.on('update', (state: GameState) => {
-      setGameState(state);
+    newSocket.on('delta', (delta: DeltaUpdate) => {
+      const localState = gameStateRef.current;
+      if (!localState) return;
 
-      if (newSocket.id && state.players[newSocket.id]) {
-        setScore(state.players[newSocket.id].score);
-      } else if (newSocket.id && !state.players[newSocket.id]) {
+      applyDelta(localState, delta);
+
+      const myId = myIdRef.current;
+      if (myId && localState.players[myId]) {
+        setScore(localState.players[myId].score);
+      } else if (myId && !localState.players[myId]) {
         setPhase('dead');
       }
     });
@@ -167,7 +214,7 @@ export default function App() {
   }, [sessionVersion]);
 
   useEffect(() => {
-    if (phase !== 'playing' || !myId) {
+    if (phase !== 'playing' || !myIdRef.current) {
       return;
     }
 
@@ -186,16 +233,16 @@ export default function App() {
 
     window.addEventListener('mousemove', handleMouseMove);
     return () => window.removeEventListener('mousemove', handleMouseMove);
-  }, [myId, phase, windowSize.height, windowSize.width]);
+  }, [phase, windowSize.height, windowSize.width]);
 
-  const returnToMenu = () => {
+  const returnToMenu = useCallback(() => {
     socketRef.current?.disconnect();
     socketRef.current = null;
-    setGameState(null);
-    setMyId(null);
+    gameStateRef.current = null;
+    myIdRef.current = null;
     setScore(0);
     setPhase('menu');
-  };
+  }, []);
 
   useEffect(() => {
     if (phase === 'menu') {
@@ -211,7 +258,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [phase]);
+  }, [phase, returnToMenu]);
 
   useEffect(() => {
     if (!canvasRef.current) {
@@ -260,6 +307,8 @@ export default function App() {
     };
 
     const render = (time: number) => {
+      const gameState = gameStateRef.current;
+      const myId = myIdRef.current;
       const me = myId && gameState ? gameState.players[myId] : null;
 
       if (phase !== 'playing' || !gameState || !me) {
@@ -372,11 +421,11 @@ export default function App() {
     return () => {
       cancelAnimationFrame(animationFrameId);
     };
-  }, [gameState, myId, phase, windowSize.height, windowSize.width]);
+  }, [phase, windowSize.height, windowSize.width]);
 
   const startGame = () => {
-    setGameState(null);
-    setMyId(null);
+    gameStateRef.current = null;
+    myIdRef.current = null;
     setScore(0);
     setPhase('connecting');
     setSessionVersion((value) => value + 1);

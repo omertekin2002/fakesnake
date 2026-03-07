@@ -30,3 +30,18 @@ export interface GameState {
 export interface ClientInput {
   targetDirection: Vector2;
 }
+
+export interface PlayerTickUpdate {
+  newHead: Vector2;
+  removeTail: boolean;
+  score: number;
+  velocity: Vector2;
+}
+
+export interface DeltaUpdate {
+  playerUpdates: Record<string, PlayerTickUpdate>;
+  newPlayers: Player[];
+  removedPlayerIds: string[];
+  newFoods: Food[];
+  removedFoodIds: string[];
+}
