@@ -18,6 +18,67 @@ const TURN_SPEED = 5; // radians per second
 const FOOD_COUNT = 500;
 const FOOD_SPAWN_RATE = 10; // per second
 const SEGMENT_DISTANCE = 200 / 30; // SNAKE_SPEED / TICK_RATE
+const SPATIAL_CELL_SIZE = 50;
+
+// ── Spatial Hash Grid ────────────────────────────────────────────────
+// Generic spatial grid for O(1) neighborhood lookups.
+// Items are bucketed into cells; queries return all items in cells
+// overlapping a square region around the query point.
+class SpatialGrid<T> {
+  private cellSize: number;
+  private cells: Map<string, T[]> = new Map();
+
+  constructor(cellSize: number) {
+    this.cellSize = cellSize;
+  }
+
+  private key(cx: number, cy: number): string {
+    return `${cx},${cy}`;
+  }
+
+  clear(): void {
+    this.cells.clear();
+  }
+
+  insert(x: number, y: number, item: T): void {
+    const cx = Math.floor(x / this.cellSize);
+    const cy = Math.floor(y / this.cellSize);
+    const k = this.key(cx, cy);
+    const bucket = this.cells.get(k);
+    if (bucket) {
+      bucket.push(item);
+    } else {
+      this.cells.set(k, [item]);
+    }
+  }
+
+  /** Return all items in cells overlapping a square of half-width `radius` around (x,y). */
+  query(x: number, y: number, radius: number): T[] {
+    const minCx = Math.floor((x - radius) / this.cellSize);
+    const maxCx = Math.floor((x + radius) / this.cellSize);
+    const minCy = Math.floor((y - radius) / this.cellSize);
+    const maxCy = Math.floor((y + radius) / this.cellSize);
+
+    const result: T[] = [];
+    for (let cx = minCx; cx <= maxCx; cx++) {
+      for (let cy = minCy; cy <= maxCy; cy++) {
+        const bucket = this.cells.get(this.key(cx, cy));
+        if (bucket) {
+          for (const item of bucket) {
+            result.push(item);
+          }
+        }
+      }
+    }
+    return result;
+  }
+}
+
+type FoodEntry = { id: string; food: Food };
+type SegmentEntry = { playerId: string; segmentIndex: number; segment: Vector2 };
+
+const foodGrid = new SpatialGrid<FoodEntry>(SPATIAL_CELL_SIZE);
+const segmentGrid = new SpatialGrid<SegmentEntry>(SPATIAL_CELL_SIZE);
 
 const app = express();
 const httpServer = createServer(app);
@@ -155,6 +216,26 @@ const updateGame = () => {
     delta.newFoods.push(...spawned);
   }
 
+  // ── Rebuild spatial grids for this tick ───────────────────────────
+  foodGrid.clear();
+  for (const foodId in state.foods) {
+    const food = state.foods[foodId];
+    foodGrid.insert(food.position.x, food.position.y, { id: foodId, food });
+  }
+
+  segmentGrid.clear();
+  for (const pid in state.players) {
+    const p = state.players[pid];
+    if (p.isDead) continue;
+    for (let i = 0; i < p.segments.length; i++) {
+      segmentGrid.insert(p.segments[i].x, p.segments[i].y, {
+        playerId: pid,
+        segmentIndex: i,
+        segment: p.segments[i],
+      });
+    }
+  }
+
   // Update players
   for (const playerId in state.players) {
     const player = state.players[playerId];
@@ -195,18 +276,18 @@ const updateGame = () => {
     // Update segments
     player.segments.unshift(newHead);
 
-    // Check food collision
-    for (const foodId in state.foods) {
-      const food = state.foods[foodId];
-      const dx = newHead.x - food.position.x;
-      const dy = newHead.y - food.position.y;
+    // Check food collision via spatial grid
+    const nearbyFoods = foodGrid.query(newHead.x, newHead.y, 20);
+    for (const entry of nearbyFoods) {
+      if (!state.foods[entry.id]) continue; // already eaten this tick
+      const dx = newHead.x - entry.food.position.x;
+      const dy = newHead.y - entry.food.position.y;
       const distSq = dx * dx + dy * dy;
       
-      // Collision radius
       if (distSq < 400) { // 20px radius
-        player.score += food.value;
-        delete state.foods[foodId];
-        delta.removedFoodIds.push(foodId);
+        player.score += entry.food.value;
+        delete state.foods[entry.id];
+        delta.removedFoodIds.push(entry.id);
       }
     }
 
@@ -228,41 +309,37 @@ const updateGame = () => {
       velocity: { ...player.velocity },
     };
 
-    // Check collision with other players
-    for (const otherId in state.players) {
-      if (playerId === otherId) continue;
-      const other = state.players[otherId];
-      if (other.isDead) continue;
+    // Check collision with other players via spatial grid
+    const nearbySegments = segmentGrid.query(newHead.x, newHead.y, 15);
+    for (const entry of nearbySegments) {
+      if (entry.playerId === playerId) continue; // skip own segments
+      const other = state.players[entry.playerId];
+      if (!other || other.isDead) continue;
 
-      for (let i = 0; i < other.segments.length; i++) {
-        const segment = other.segments[i];
-        const dx = newHead.x - segment.x;
-        const dy = newHead.y - segment.y;
-        const distSq = dx * dx + dy * dy;
+      const dx = newHead.x - entry.segment.x;
+      const dy = newHead.y - entry.segment.y;
+      const distSq = dx * dx + dy * dy;
 
-        // Collision radius for segments
-        if (distSq < 225) { // 15px radius
-          player.isDead = true;
-          delta.removedPlayerIds.push(playerId);
-          
-          // Spawn food where player died
-          player.segments.forEach((seg, index) => {
-            if (index % 2 === 0) { // Don't spawn too much food
-              const id = generateFoodId();
-              const newFood: Food = {
-                id,
-                position: { ...seg },
-                value: 3,
-                color: player.color,
-              };
-              state.foods[id] = newFood;
-              delta.newFoods.push(newFood);
-            }
-          });
-          break;
-        }
+      if (distSq < 225) { // 15px radius
+        player.isDead = true;
+        delta.removedPlayerIds.push(playerId);
+        
+        // Spawn food where player died
+        player.segments.forEach((seg, index) => {
+          if (index % 2 === 0) {
+            const id = generateFoodId();
+            const newFood: Food = {
+              id,
+              position: { ...seg },
+              value: 3,
+              color: player.color,
+            };
+            state.foods[id] = newFood;
+            delta.newFoods.push(newFood);
+          }
+        });
+        break;
       }
-      if (player.isDead) break;
     }
   }
 
