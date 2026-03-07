@@ -6,7 +6,7 @@ export interface Vector2 {
 export interface Player {
   id: string;
   name: string;
-  color: string;
+  hue: number;
   segments: Vector2[];
   velocity: Vector2;
   targetDirection: Vector2;
@@ -18,7 +18,7 @@ export interface Food {
   id: string;
   position: Vector2;
   value: number;
-  color: string;
+  hue: number;
 }
 
 export interface GameState {

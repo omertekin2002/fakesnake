@@ -21,9 +21,6 @@ const SEGMENT_DISTANCE = 200 / 30; // SNAKE_SPEED / TICK_RATE
 const SPATIAL_CELL_SIZE = 50;
 
 // ── Spatial Hash Grid ────────────────────────────────────────────────
-// Generic spatial grid for O(1) neighborhood lookups.
-// Items are bucketed into cells; queries return all items in cells
-// overlapping a square region around the query point.
 class SpatialGrid<T> {
   private cellSize: number;
   private cells: Map<string, T[]> = new Map();
@@ -52,7 +49,6 @@ class SpatialGrid<T> {
     }
   }
 
-  /** Return all items in cells overlapping a square of half-width `radius` around (x,y). */
   query(x: number, y: number, radius: number): T[] {
     const minCx = Math.floor((x - radius) / this.cellSize);
     const maxCx = Math.floor((x + radius) / this.cellSize);
@@ -88,13 +84,12 @@ const io = new Server(httpServer, {
   },
 });
 
-const state: GameState = {
-  players: {},
-  foods: {},
-  worldSize: WORLD_SIZE,
-};
+// ── Server-side state using Maps for faster iteration/deletion ──────
+const players = new Map<string, Player>();
+const foods = new Map<string, Food>();
 
 let foodIdCounter = 0;
+let foodCount = 0; // O(1) counter instead of foods.size each tick
 
 // Helper functions
 const randomPosition = (): Vector2 => ({
@@ -104,12 +99,8 @@ const randomPosition = (): Vector2 => ({
 
 const generateFoodId = () => `f${foodIdCounter++}`;
 
-const randomColor = () => {
-  const hue = Math.floor(Math.random() * 360);
-  return `hsl(${hue}, 80%, 60%)`;
-};
+const randomHue = () => Math.floor(Math.random() * 360);
 
-// Delta-aware food spawning: returns the newly created Food items
 const spawnFood = (count: number): Food[] => {
   const spawned: Food[] = [];
   for (let i = 0; i < count; i++) {
@@ -118,21 +109,28 @@ const spawnFood = (count: number): Food[] => {
       id,
       position: randomPosition(),
       value: Math.floor(Math.random() * 5) + 1,
-      color: randomColor(),
+      hue: randomHue(),
     };
-    state.foods[id] = food;
+    foods.set(id, food);
+    foodCount++;
     spawned.push(food);
   }
   return spawned;
 };
 
-// Initial food (no need to track delta for these — clients get full state on init)
+// Convert Maps to Records for serialization (used only on init)
+const serializeState = (): GameState => ({
+  players: Object.fromEntries(players),
+  foods: Object.fromEntries(foods),
+  worldSize: WORLD_SIZE,
+});
+
+// Initial food
 spawnFood(FOOD_COUNT);
 
 io.on('connection', (socket) => {
   console.log(`Player connected: ${socket.id}`);
 
-  // Create new player
   const startPos = randomPosition();
   const startDir = { x: 1, y: 0 };
   const segments: Vector2[] = [];
@@ -146,7 +144,7 @@ io.on('connection', (socket) => {
   const newPlayer: Player = {
     id: socket.id,
     name: `Player ${Math.floor(Math.random() * 1000)}`,
-    color: randomColor(),
+    hue: randomHue(),
     segments,
     velocity: startDir,
     targetDirection: startDir,
@@ -154,20 +152,16 @@ io.on('connection', (socket) => {
     isDead: false,
   };
 
-  state.players[socket.id] = newPlayer;
+  players.set(socket.id, newPlayer);
 
-  // New client gets the full state snapshot
-  socket.emit('init', { id: socket.id, state });
+  // Full state snapshot for the new client (converted from Maps → Records)
+  socket.emit('init', { id: socket.id, state: serializeState() });
 
-  // Other clients will learn about this player via the next delta tick
-  // (newPlayers array), so no separate broadcast needed here.
-  // We store the player reference so the next tick picks it up as a newPlayer.
   pendingNewPlayers.push(newPlayer);
 
   socket.on('input', (targetDirection: Vector2) => {
-    const player = state.players[socket.id];
+    const player = players.get(socket.id);
     if (player && !player.isDead) {
-      // Normalize target direction
       const length = Math.sqrt(targetDirection.x ** 2 + targetDirection.y ** 2);
       if (length > 0) {
         player.targetDirection = {
@@ -180,12 +174,11 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     console.log(`Player disconnected: ${socket.id}`);
-    delete state.players[socket.id];
+    players.delete(socket.id);
     pendingRemovedPlayerIds.push(socket.id);
   });
 });
 
-// Pending queues for events that happen between ticks
 let pendingNewPlayers: Player[] = [];
 let pendingRemovedPlayerIds: string[] = [];
 
@@ -196,7 +189,6 @@ const updateGame = () => {
   const dt = (now - lastTime) / 1000;
   lastTime = now;
 
-  // Build delta for this tick
   const delta: DeltaUpdate = {
     playerUpdates: {},
     newPlayers: [...pendingNewPlayers],
@@ -205,27 +197,23 @@ const updateGame = () => {
     removedFoodIds: [],
   };
 
-  // Clear pending queues
   pendingNewPlayers = [];
   pendingRemovedPlayerIds = [];
 
   // Maintain food count
-  const currentFoodCount = Object.keys(state.foods).length;
-  if (currentFoodCount < FOOD_COUNT) {
-    const spawned = spawnFood(Math.min(FOOD_SPAWN_RATE, FOOD_COUNT - currentFoodCount));
+  if (foodCount < FOOD_COUNT) {
+    const spawned = spawnFood(Math.min(FOOD_SPAWN_RATE, FOOD_COUNT - foodCount));
     delta.newFoods.push(...spawned);
   }
 
-  // ── Rebuild spatial grids for this tick ───────────────────────────
+  // ── Rebuild spatial grids ──────────────────────────────────────────
   foodGrid.clear();
-  for (const foodId in state.foods) {
-    const food = state.foods[foodId];
+  for (const [foodId, food] of foods) {
     foodGrid.insert(food.position.x, food.position.y, { id: foodId, food });
   }
 
   segmentGrid.clear();
-  for (const pid in state.players) {
-    const p = state.players[pid];
+  for (const [pid, p] of players) {
     if (p.isDead) continue;
     for (let i = 0; i < p.segments.length; i++) {
       segmentGrid.insert(p.segments[i].x, p.segments[i].y, {
@@ -237,8 +225,9 @@ const updateGame = () => {
   }
 
   // Update players
-  for (const playerId in state.players) {
-    const player = state.players[playerId];
+  const deadPlayerIds: string[] = [];
+
+  for (const [playerId, player] of players) {
     if (player.isDead) continue;
 
     // Smoothly rotate velocity towards targetDirection
@@ -246,7 +235,6 @@ const updateGame = () => {
     const targetAngle = Math.atan2(player.targetDirection.y, player.targetDirection.x);
     
     let angleDiff = targetAngle - currentAngle;
-    // Normalize angle difference to [-PI, PI]
     while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
     while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
     
@@ -263,30 +251,28 @@ const updateGame = () => {
 
     const head = player.segments[0];
     
-    // Move head
     const newHead = {
       x: head.x + player.velocity.x * SNAKE_SPEED * dt,
       y: head.y + player.velocity.y * SNAKE_SPEED * dt,
     };
 
-    // Keep inside world bounds
     newHead.x = Math.max(0, Math.min(WORLD_SIZE, newHead.x));
     newHead.y = Math.max(0, Math.min(WORLD_SIZE, newHead.y));
 
-    // Update segments
     player.segments.unshift(newHead);
 
     // Check food collision via spatial grid
     const nearbyFoods = foodGrid.query(newHead.x, newHead.y, 20);
     for (const entry of nearbyFoods) {
-      if (!state.foods[entry.id]) continue; // already eaten this tick
+      if (!foods.has(entry.id)) continue; // already eaten this tick
       const dx = newHead.x - entry.food.position.x;
       const dy = newHead.y - entry.food.position.y;
       const distSq = dx * dx + dy * dy;
       
-      if (distSq < 400) { // 20px radius
+      if (distSq < 400) {
         player.score += entry.food.value;
-        delete state.foods[entry.id];
+        foods.delete(entry.id);
+        foodCount--;
         delta.removedFoodIds.push(entry.id);
       }
     }
@@ -294,14 +280,12 @@ const updateGame = () => {
     // Determine target length based on score
     const targetLength = INITIAL_SNAKE_LENGTH + Math.floor(player.score * 2);
 
-    // Remove tail if we are over target length
     let removedTail = false;
     if (player.segments.length > targetLength) {
       player.segments.pop();
       removedTail = true;
     }
 
-    // Record this player's tick update in the delta
     delta.playerUpdates[playerId] = {
       newHead,
       removeTail: removedTail,
@@ -312,17 +296,18 @@ const updateGame = () => {
     // Check collision with other players via spatial grid
     const nearbySegments = segmentGrid.query(newHead.x, newHead.y, 15);
     for (const entry of nearbySegments) {
-      if (entry.playerId === playerId) continue; // skip own segments
-      const other = state.players[entry.playerId];
+      if (entry.playerId === playerId) continue;
+      const other = players.get(entry.playerId);
       if (!other || other.isDead) continue;
 
       const dx = newHead.x - entry.segment.x;
       const dy = newHead.y - entry.segment.y;
       const distSq = dx * dx + dy * dy;
 
-      if (distSq < 225) { // 15px radius
+      if (distSq < 225) {
         player.isDead = true;
         delta.removedPlayerIds.push(playerId);
+        deadPlayerIds.push(playerId);
         
         // Spawn food where player died
         player.segments.forEach((seg, index) => {
@@ -332,9 +317,10 @@ const updateGame = () => {
               id,
               position: { ...seg },
               value: 3,
-              color: player.color,
+              hue: player.hue,
             };
-            state.foods[id] = newFood;
+            foods.set(id, newFood);
+            foodCount++;
             delta.newFoods.push(newFood);
           }
         });
@@ -343,26 +329,21 @@ const updateGame = () => {
     }
   }
 
-  // Remove dead players from server state
-  for (const playerId in state.players) {
-    if (state.players[playerId].isDead) {
-      delete state.players[playerId];
-    }
+  // Remove dead players — delete from Map directly (no second pass needed)
+  for (const id of deadPlayerIds) {
+    players.delete(id);
   }
 
-  // Broadcast delta instead of full state
   io.emit('delta', delta);
 };
 
 setInterval(updateGame, 1000 / TICK_RATE);
 
 async function startServer() {
-  // API routes
   app.get('/api/health', (req, res) => {
     res.json({ status: 'ok' });
   });
 
-  // Vite middleware for development
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },

@@ -5,6 +5,7 @@ import { GameState, Player, DeltaUpdate } from './shared/types';
 const WORLD_SIZE = 3000;
 const GRID_SIZE = 50;
 const MENU_DRIFT_RANGE = 18;
+const INPUT_THROTTLE_MS = 1000 / 30; // match server tick rate
 
 type GamePhase = 'menu' | 'connecting' | 'playing' | 'dead';
 
@@ -12,7 +13,7 @@ type MenuFood = {
   x: number;
   y: number;
   value: number;
-  color: string;
+  hue: number;
   driftOffset: number;
   driftSpeed: number;
 };
@@ -23,10 +24,8 @@ declare global {
   }
 }
 
-const randomColor = (seed?: number) => {
-  const hue = typeof seed === 'number' ? seed % 360 : Math.floor(Math.random() * 360);
-  return `hsl(${hue}, 80%, 60%)`;
-};
+// ── Hue-to-HSL conversion (shared helper) ────────────────────────────
+const hueToHsl = (hue: number) => `hsl(${hue}, 80%, 60%)`;
 
 const createMenuFoods = (width: number, height: number): MenuFood[] => {
   const count = Math.max(35, Math.floor((width * height) / 22000));
@@ -35,7 +34,7 @@ const createMenuFoods = (width: number, height: number): MenuFood[] => {
     x: Math.random() * width,
     y: Math.random() * height,
     value: (index % 5) + 1,
-    color: randomColor(index * 47),
+    hue: (index * 47) % 360,
     driftOffset: Math.random() * Math.PI * 2,
     driftSpeed: 0.6 + Math.random() * 0.8,
   }));
@@ -70,7 +69,6 @@ const drawGrid = (
 };
 
 // ── Optimized food glow: pre-rendered offscreen sprites ──────────────
-// Cache: key = "color|radius|glow" → offscreen canvas
 const glowSpriteCache = new Map<string, HTMLCanvasElement>();
 
 const getGlowSprite = (radius: number, color: string, glowStrength: number): HTMLCanvasElement => {
@@ -78,7 +76,6 @@ const getGlowSprite = (radius: number, color: string, glowStrength: number): HTM
   let sprite = glowSpriteCache.get(key);
   if (sprite) return sprite;
 
-  // Sprite needs to be large enough to contain the glow halo
   const padding = glowStrength * 2;
   const size = (radius + padding) * 2;
   sprite = document.createElement('canvas');
@@ -111,12 +108,10 @@ const drawFoodBlob = (
 
 // Apply a DeltaUpdate to a local GameState (mutates in place)
 const applyDelta = (localState: GameState, delta: DeltaUpdate): void => {
-  // Add new players
   for (const player of delta.newPlayers) {
     localState.players[player.id] = player;
   }
 
-  // Apply per-player tick updates (head movement, tail removal, score, velocity)
   for (const playerId in delta.playerUpdates) {
     const player = localState.players[playerId];
     if (!player) continue;
@@ -130,17 +125,14 @@ const applyDelta = (localState: GameState, delta: DeltaUpdate): void => {
     player.velocity = update.velocity;
   }
 
-  // Remove dead/disconnected players
   for (const id of delta.removedPlayerIds) {
     delete localState.players[id];
   }
 
-  // Add new food
   for (const food of delta.newFoods) {
     localState.foods[food.id] = food;
   }
 
-  // Remove eaten food
   for (const id of delta.removedFoodIds) {
     delete localState.foods[id];
   }
@@ -155,11 +147,21 @@ export default function App() {
   const gameStateRef = useRef<GameState | null>(null);
   const myIdRef = useRef<string | null>(null);
 
-  // UI-level state that needs React renders (phase changes, score display in death screen)
+  // UI-level state that needs React renders
   const [score, setScore] = useState(0);
   const [phase, setPhase] = useState<GamePhase>('menu');
   const [sessionVersion, setSessionVersion] = useState(0);
   const [windowSize, setWindowSize] = useState({ width: window.innerWidth, height: window.innerHeight });
+
+  // ── Imperative canvas sizing ───────────────────────────────────────
+  // Set canvas width/height directly via the DOM instead of React props
+  // to avoid React clearing the canvas buffer on re-render.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.width = windowSize.width;
+    canvas.height = windowSize.height;
+  }, [windowSize.width, windowSize.height]);
 
   useEffect(() => {
     const handleResize = () => {
@@ -240,7 +242,13 @@ export default function App() {
       return;
     }
 
+    let lastEmitTime = 0;
+
     const handleMouseMove = (e: MouseEvent) => {
+      const now = performance.now();
+      if (now - lastEmitTime < INPUT_THROTTLE_MS) return;
+      lastEmitTime = now;
+
       if (!canvasRef.current) return;
 
       const socket = socketRef.current;
@@ -304,12 +312,13 @@ export default function App() {
       for (const food of menuFoodsRef.current) {
         const drift = Math.sin(time * 0.001 * food.driftSpeed + food.driftOffset) * MENU_DRIFT_RANGE;
         const verticalDrift = Math.cos(time * 0.0012 * food.driftSpeed + food.driftOffset) * (MENU_DRIFT_RANGE * 0.65);
+        const color = hueToHsl(food.hue);
         drawFoodBlob(
           ctx,
           food.x + drift,
           food.y + verticalDrift,
           5 + food.value,
-          food.color,
+          color,
           10 + food.value * 1.5,
         );
       }
@@ -362,7 +371,7 @@ export default function App() {
           food.position.y > cameraY - 20 &&
           food.position.y < cameraY + windowSize.height + 20
         ) {
-          drawFoodBlob(ctx, food.position.x, food.position.y, 5 + food.value, food.color, 10);
+          drawFoodBlob(ctx, food.position.x, food.position.y, 5 + food.value, hueToHsl(food.hue), 10);
         }
       }
 
@@ -370,9 +379,10 @@ export default function App() {
       for (const playerId in gameState.players) {
         const player = gameState.players[playerId];
         const head = player.segments[0];
+        const playerColor = hueToHsl(player.hue);
 
         // Batch all body segments (index > 0) into a single path
-        ctx.fillStyle = player.color;
+        ctx.fillStyle = playerColor;
         ctx.beginPath();
         for (let i = player.segments.length - 1; i > 0; i--) {
           const segment = player.segments[i];
@@ -395,7 +405,7 @@ export default function App() {
           head.y > cameraY - 30 &&
           head.y < cameraY + windowSize.height + 30
         ) {
-          ctx.fillStyle = player.color;
+          ctx.fillStyle = playerColor;
           ctx.beginPath();
           ctx.arc(head.x, head.y, 15, 0, Math.PI * 2);
           ctx.fill();
@@ -476,8 +486,6 @@ export default function App() {
       <div className="relative h-screen w-full overflow-hidden">
         <canvas
           ref={canvasRef}
-          width={windowSize.width}
-          height={windowSize.height}
           className={`block bg-[#1a1a1a] ${phase === 'playing' ? 'cursor-crosshair' : 'cursor-default'}`}
         />
 
