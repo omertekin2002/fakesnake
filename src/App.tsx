@@ -41,6 +41,7 @@ const createMenuFoods = (width: number, height: number): MenuFood[] => {
   }));
 };
 
+// ── Optimized grid: single batched path ──────────────────────────────
 const drawGrid = (
   ctx: CanvasRenderingContext2D,
   cameraX: number,
@@ -50,23 +51,50 @@ const drawGrid = (
 ) => {
   ctx.strokeStyle = '#333';
   ctx.lineWidth = 1;
+  ctx.beginPath();
 
   const startX = Math.floor(cameraX / GRID_SIZE) * GRID_SIZE;
   const startY = Math.floor(cameraY / GRID_SIZE) * GRID_SIZE;
 
   for (let x = startX; x < cameraX + width; x += GRID_SIZE) {
-    ctx.beginPath();
     ctx.moveTo(x, cameraY);
     ctx.lineTo(x, cameraY + height);
-    ctx.stroke();
   }
 
   for (let y = startY; y < cameraY + height; y += GRID_SIZE) {
-    ctx.beginPath();
     ctx.moveTo(cameraX, y);
     ctx.lineTo(cameraX + width, y);
-    ctx.stroke();
   }
+
+  ctx.stroke();
+};
+
+// ── Optimized food glow: pre-rendered offscreen sprites ──────────────
+// Cache: key = "color|radius|glow" → offscreen canvas
+const glowSpriteCache = new Map<string, HTMLCanvasElement>();
+
+const getGlowSprite = (radius: number, color: string, glowStrength: number): HTMLCanvasElement => {
+  const key = `${color}|${radius}|${glowStrength}`;
+  let sprite = glowSpriteCache.get(key);
+  if (sprite) return sprite;
+
+  // Sprite needs to be large enough to contain the glow halo
+  const padding = glowStrength * 2;
+  const size = (radius + padding) * 2;
+  sprite = document.createElement('canvas');
+  sprite.width = size;
+  sprite.height = size;
+
+  const sctx = sprite.getContext('2d')!;
+  sctx.fillStyle = color;
+  sctx.shadowBlur = glowStrength;
+  sctx.shadowColor = color;
+  sctx.beginPath();
+  sctx.arc(size / 2, size / 2, radius, 0, Math.PI * 2);
+  sctx.fill();
+
+  glowSpriteCache.set(key, sprite);
+  return sprite;
 };
 
 const drawFoodBlob = (
@@ -77,14 +105,8 @@ const drawFoodBlob = (
   color: string,
   glowStrength: number,
 ) => {
-  ctx.save();
-  ctx.fillStyle = color;
-  ctx.shadowBlur = glowStrength;
-  ctx.shadowColor = color;
-  ctx.beginPath();
-  ctx.arc(x, y, radius, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
+  const sprite = getGlowSprite(radius, color, glowStrength);
+  ctx.drawImage(sprite, x - sprite.width / 2, y - sprite.height / 2);
 };
 
 // Apply a DeltaUpdate to a local GameState (mutates in place)
@@ -344,42 +366,60 @@ export default function App() {
         }
       }
 
+      // ── Optimized snake rendering: batch body segments per player ──
       for (const playerId in gameState.players) {
         const player = gameState.players[playerId];
+        const head = player.segments[0];
 
-        for (let i = player.segments.length - 1; i >= 0; i--) {
+        // Batch all body segments (index > 0) into a single path
+        ctx.fillStyle = player.color;
+        ctx.beginPath();
+        for (let i = player.segments.length - 1; i > 0; i--) {
           const segment = player.segments[i];
-
           if (
             segment.x > cameraX - 30 &&
             segment.x < cameraX + windowSize.width + 30 &&
             segment.y > cameraY - 30 &&
             segment.y < cameraY + windowSize.height + 30
           ) {
-            ctx.fillStyle = player.color;
-            ctx.beginPath();
-            const radius = i === 0 ? 15 : 12;
-            ctx.arc(segment.x, segment.y, radius, 0, Math.PI * 2);
-            ctx.fill();
-
-            if (i === 0) {
-              ctx.fillStyle = 'white';
-              const eyeOffset = 5;
-              ctx.beginPath();
-              ctx.arc(segment.x - eyeOffset, segment.y - eyeOffset, 4, 0, Math.PI * 2);
-              ctx.arc(segment.x + eyeOffset, segment.y - eyeOffset, 4, 0, Math.PI * 2);
-              ctx.fill();
-
-              ctx.fillStyle = 'black';
-              ctx.beginPath();
-              ctx.arc(segment.x - eyeOffset, segment.y - eyeOffset, 2, 0, Math.PI * 2);
-              ctx.arc(segment.x + eyeOffset, segment.y - eyeOffset, 2, 0, Math.PI * 2);
-              ctx.fill();
-            }
+            ctx.moveTo(segment.x + 12, segment.y);
+            ctx.arc(segment.x, segment.y, 12, 0, Math.PI * 2);
           }
         }
+        ctx.fill();
 
-        const head = player.segments[0];
+        // Draw head separately (larger + eyes)
+        if (
+          head.x > cameraX - 30 &&
+          head.x < cameraX + windowSize.width + 30 &&
+          head.y > cameraY - 30 &&
+          head.y < cameraY + windowSize.height + 30
+        ) {
+          ctx.fillStyle = player.color;
+          ctx.beginPath();
+          ctx.arc(head.x, head.y, 15, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Eyes
+          const eyeOffset = 5;
+          ctx.fillStyle = 'white';
+          ctx.beginPath();
+          ctx.moveTo(head.x - eyeOffset + 4, head.y - eyeOffset);
+          ctx.arc(head.x - eyeOffset, head.y - eyeOffset, 4, 0, Math.PI * 2);
+          ctx.moveTo(head.x + eyeOffset + 4, head.y - eyeOffset);
+          ctx.arc(head.x + eyeOffset, head.y - eyeOffset, 4, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = 'black';
+          ctx.beginPath();
+          ctx.moveTo(head.x - eyeOffset + 2, head.y - eyeOffset);
+          ctx.arc(head.x - eyeOffset, head.y - eyeOffset, 2, 0, Math.PI * 2);
+          ctx.moveTo(head.x + eyeOffset + 2, head.y - eyeOffset);
+          ctx.arc(head.x + eyeOffset, head.y - eyeOffset, 2, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        // Player name above head
         if (
           head.x > cameraX - 50 &&
           head.x < cameraX + windowSize.width + 50 &&
