@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { io, Socket } from 'socket.io-client';
-import { GameState, Player, DeltaUpdate } from './shared/types';
+import { GameState, Player, DeltaUpdate, InitPayload, WorldSummary } from './shared/types';
 import {
   DEFAULT_SNAKE_APPEARANCE,
   getSnakePalette,
@@ -294,6 +294,11 @@ export default function App() {
 
   // Game state lives in a ref — no React re-renders per tick
   const gameStateRef = useRef<GameState | null>(null);
+  const worldSummaryRef = useRef<WorldSummary>({
+    players: [],
+    foodCount: 0,
+    worldSize: WORLD_SIZE,
+  });
   const myIdRef = useRef<string | null>(null);
   const playerNameRef = useRef('');
   const appearanceRef = useRef<SnakeAppearance>(DEFAULT_SNAKE_APPEARANCE);
@@ -348,12 +353,15 @@ export default function App() {
   useEffect(() => {
     window.render_game_to_text = () => {
       const gs = gameStateRef.current;
+      const summary = worldSummaryRef.current;
       return JSON.stringify({
         mode: phase,
         myId: myIdRef.current,
         score,
-        players: gs ? Object.keys(gs.players).length : 0,
-        foods: gs ? Object.keys(gs.foods).length : 0,
+        players: summary.players.length,
+        foods: summary.foodCount,
+        visiblePlayers: gs ? Object.keys(gs.players).length : 0,
+        visibleFoods: gs ? Object.keys(gs.foods).length : 0,
         appearance,
         viewport: windowSize,
         coordinates: 'origin at top-left, +x right, +y down',
@@ -379,9 +387,10 @@ export default function App() {
     });
     socketRef.current = newSocket;
 
-    newSocket.on('init', (data: { id: string; state: GameState }) => {
+    newSocket.on('init', (data: InitPayload) => {
       myIdRef.current = data.id;
       gameStateRef.current = data.state;
+      worldSummaryRef.current = data.summary;
       setPhase('playing');
     });
 
@@ -450,6 +459,7 @@ export default function App() {
       lastDeltaTimeRef.current = now;
 
       applyDelta(localState, delta);
+      worldSummaryRef.current = delta.summary;
 
       if (myId && localState.players[myId]) {
         setScore(localState.players[myId].score);
@@ -561,7 +571,7 @@ export default function App() {
     }
 
     let animationFrameId = 0;
-    let leaderboardCache: { top5: Player[]; myRank: number } | null = null;
+    let leaderboardCache: { top5: WorldSummary['players']; myRank: number } | null = null;
     let leaderboardCacheTime = 0;
 
     const renderMenuScene = (time: number) => {
@@ -603,6 +613,7 @@ export default function App() {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
       const gameState = gameStateRef.current;
+      const worldSummary = worldSummaryRef.current;
       const myId = myIdRef.current;
       const me = myId && gameState ? gameState.players[myId] : null;
 
@@ -803,13 +814,13 @@ export default function App() {
       ctx.textAlign = 'left';
       ctx.fillText(`Score: ${me.score}`, 20, windowSize.height - 24);
 
-      const playerCount = Object.keys(gameState.players).length;
+      const playerCount = worldSummary.players.length;
       ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
       ctx.font = '14px Arial';
       ctx.fillText(`${playerCount} player${playerCount !== 1 ? 's' : ''} alive`, 20, windowSize.height - 50);
 
       if (!leaderboardCache || now - leaderboardCacheTime > 500) {
-        const sorted = (Object.values(gameState.players) as Player[])
+        const sorted = [...worldSummary.players]
           .sort((a, b) => b.score - a.score);
         leaderboardCache = { top5: sorted.slice(0, 5), myRank: sorted.findIndex((p) => p.id === myId) + 1 };
         leaderboardCacheTime = now;
@@ -846,27 +857,13 @@ export default function App() {
       ctx.lineWidth = 1;
       ctx.strokeRect(mmX, mmY, mmSize, mmSize);
 
-      // Food dots (batched)
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
-      ctx.beginPath();
-      for (const foodId in gameState.foods) {
-        const food = gameState.foods[foodId];
-        const fx = mmX + food.position.x * mmScale;
-        const fy = mmY + food.position.y * mmScale;
-        ctx.moveTo(fx + 1, fy);
-        ctx.arc(fx, fy, 1, 0, Math.PI * 2);
-      }
-      ctx.fill();
-
       // Other players (heads only)
-      for (const pid in gameState.players) {
-        const p = gameState.players[pid];
-        const ph = p.segments[0];
-        const px = mmX + ph.x * mmScale;
-        const py = mmY + ph.y * mmScale;
+      for (const playerSummary of worldSummary.players) {
+        const px = mmX + playerSummary.position.x * mmScale;
+        const py = mmY + playerSummary.position.y * mmScale;
 
-        if (pid === myId) continue;
-        ctx.fillStyle = getSnakePalette(p.appearance?.paletteId ?? DEFAULT_SNAKE_APPEARANCE.paletteId).primary;
+        if (playerSummary.id === myId) continue;
+        ctx.fillStyle = getSnakePalette(playerSummary.appearance.paletteId).primary;
         ctx.beginPath();
         ctx.arc(px, py, 2.5, 0, Math.PI * 2);
         ctx.fill();

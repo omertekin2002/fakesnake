@@ -31,6 +31,26 @@ export interface GameState {
   worldSize: number;
 }
 
+export interface WorldPlayerSummary {
+  id: string;
+  name: string;
+  appearance: SnakeAppearance;
+  position: Vector2;
+  score: number;
+}
+
+export interface WorldSummary {
+  players: WorldPlayerSummary[];
+  foodCount: number;
+  worldSize: number;
+}
+
+export interface InitPayload {
+  id: string;
+  state: GameState;
+  summary: WorldSummary;
+}
+
 export interface ClientInput {
   targetDirection: Vector2;
 }
@@ -48,4 +68,5 @@ export interface DeltaUpdate {
   removedPlayerIds: string[];
   newFoods: Food[];
   removedFoodIds: string[];
+  summary: WorldSummary;
 }

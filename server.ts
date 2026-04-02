@@ -4,7 +4,7 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { Player, Food, GameState, Vector2, DeltaUpdate } from './src/shared/types.js';
+import { Player, Food, GameState, Vector2, DeltaUpdate, WorldSummary } from './src/shared/types.js';
 import {
   createRandomSnakeAppearance,
   getSnakePalette,
@@ -37,6 +37,10 @@ const BOT_SPAWN_HEAD_SAFE_RADIUS = 900;
 const BOT_SPAWN_SEGMENT_SAFE_RADIUS = 260;
 const BOT_SPAWN_VIEWPORT_MARGIN = 120;
 const BOT_SPAWN_ATTEMPTS = 80;
+const HUMAN_SPAWN_MARGIN = 420;
+const HUMAN_SPAWN_HEAD_SAFE_RADIUS = 1000;
+const HUMAN_SPAWN_SEGMENT_SAFE_RADIUS = 320;
+const HUMAN_SPAWN_ATTEMPTS = 120;
 const MIN_VIEWPORT_WIDTH = 320;
 const MIN_VIEWPORT_HEIGHT = 240;
 const MAX_VIEWPORT_WIDTH = 2560;
@@ -44,6 +48,7 @@ const MAX_VIEWPORT_HEIGHT = 1440;
 const DEFAULT_VIEWPORT = { width: 1280, height: 720 };
 const FIXED_DT = 1 / TICK_RATE;
 const MAX_ACCUMULATED_TIME = 0.25;
+const SPAWN_PROTECTION_MS = 2500;
 const BOT_NAMES = [
   'Slinky', 'Noodle', 'Zigzag', 'Slithers', 'Hissy',
   'Coil', 'Viper', 'Fang', 'Scales', 'Twisty',
@@ -55,6 +60,7 @@ let botIdCounter = 0;
 const isBot = (id: string) => id.startsWith(BOT_PREFIX);
 
 type ViewportSize = { width: number; height: number };
+type SpawnCandidate = { startPos: Vector2; startDir: Vector2; segments: Vector2[] };
 
 const distanceSq = (a: Vector2, b: Vector2): number => {
   const dx = a.x - b.x;
@@ -105,6 +111,17 @@ const randomSpawnPosition = (margin = 0): Vector2 => ({
   x: margin + Math.random() * (WORLD_SIZE - margin * 2),
   y: margin + Math.random() * (WORLD_SIZE - margin * 2),
 });
+
+const createSpawnCandidate = (margin: number): SpawnCandidate => {
+  const startPos = randomSpawnPosition(margin);
+  const angle = Math.random() * Math.PI * 2;
+  const startDir = { x: Math.cos(angle), y: Math.sin(angle) };
+  return {
+    startPos,
+    startDir,
+    segments: buildInitialSegments(startPos, startDir),
+  };
+};
 
 const isPointInsideViewport = (point: Vector2, head: Vector2, viewport: ViewportSize): boolean => {
   const halfWidth = viewport.width / 2 + BOT_SPAWN_VIEWPORT_MARGIN;
@@ -186,23 +203,21 @@ const isBotSpawnSafe = (segments: Vector2[]): boolean => {
 };
 
 const pickBotSpawn = (): { startPos: Vector2; startDir: Vector2; segments: Vector2[] } => {
-  let bestCandidate: { startPos: Vector2; startDir: Vector2; segments: Vector2[] } | null = null;
+  let bestCandidate: SpawnCandidate | null = null;
   let bestScore = -Infinity;
 
   for (let attempt = 0; attempt < BOT_SPAWN_ATTEMPTS; attempt++) {
-    const startPos = randomSpawnPosition(BOT_SPAWN_MARGIN);
-    const angle = Math.random() * Math.PI * 2;
-    const startDir = { x: Math.cos(angle), y: Math.sin(angle) };
-    const segments = buildInitialSegments(startPos, startDir);
+    const candidate = createSpawnCandidate(BOT_SPAWN_MARGIN);
+    const { segments } = candidate;
 
     if (isBotSpawnSafe(segments)) {
-      return { startPos, startDir, segments };
+      return candidate;
     }
 
     const score = scoreBotSpawnCandidate(segments);
     if (score > bestScore) {
       bestScore = score;
-      bestCandidate = { startPos, startDir, segments };
+      bestCandidate = candidate;
     }
   }
 
@@ -210,10 +225,101 @@ const pickBotSpawn = (): { startPos: Vector2; startDir: Vector2; segments: Vecto
     return bestCandidate;
   }
 
-  const startPos = randomSpawnPosition(BOT_SPAWN_MARGIN);
-  const angle = Math.random() * Math.PI * 2;
-  const startDir = { x: Math.cos(angle), y: Math.sin(angle) };
-  return { startPos, startDir, segments: buildInitialSegments(startPos, startDir) };
+  return createSpawnCandidate(BOT_SPAWN_MARGIN);
+};
+
+const scoreHumanSpawnCandidate = (segments: Vector2[]): number => {
+  const head = segments[0];
+  let minDistSq = Infinity;
+  let viewportPenalty = 0;
+
+  for (const [playerId, player] of players) {
+    if (player.isDead) continue;
+
+    minDistSq = Math.min(minDistSq, distanceSq(head, player.segments[0]));
+
+    for (let i = 0; i < player.segments.length; i += 5) {
+      minDistSq = Math.min(minDistSq, distanceSq(head, player.segments[i]));
+    }
+
+    if (!isBot(playerId)) {
+      const viewport = playerViewports.get(playerId) ?? DEFAULT_VIEWPORT;
+      if (isPointInsideViewport(head, player.segments[0], viewport)) {
+        viewportPenalty += 100;
+      }
+      for (let i = 0; i < segments.length; i += 5) {
+        if (isPointInsideViewport(segments[i], player.segments[0], viewport)) {
+          viewportPenalty += 10;
+        }
+      }
+    }
+  }
+
+  return minDistSq - viewportPenalty * WORLD_SIZE * WORLD_SIZE;
+};
+
+const isHumanSpawnSafe = (segments: Vector2[]): boolean => {
+  const headRadiusSq = HUMAN_SPAWN_HEAD_SAFE_RADIUS * HUMAN_SPAWN_HEAD_SAFE_RADIUS;
+  const segmentRadiusSq = HUMAN_SPAWN_SEGMENT_SAFE_RADIUS * HUMAN_SPAWN_SEGMENT_SAFE_RADIUS;
+  const head = segments[0];
+
+  for (const [playerId, player] of players) {
+    if (player.isDead) continue;
+
+    if (distanceSq(head, player.segments[0]) < headRadiusSq) {
+      return false;
+    }
+
+    for (let i = 0; i < player.segments.length; i += 5) {
+      if (distanceSq(head, player.segments[i]) < segmentRadiusSq) {
+        return false;
+      }
+    }
+
+    for (let i = 0; i < segments.length; i += 5) {
+      if (distanceSq(segments[i], player.segments[0]) < segmentRadiusSq) {
+        return false;
+      }
+    }
+
+    if (!isBot(playerId)) {
+      const viewport = playerViewports.get(playerId) ?? DEFAULT_VIEWPORT;
+      if (isPointInsideViewport(head, player.segments[0], viewport)) {
+        return false;
+      }
+      for (let i = 0; i < segments.length; i += 5) {
+        if (isPointInsideViewport(segments[i], player.segments[0], viewport)) {
+          return false;
+        }
+      }
+    }
+  }
+
+  return true;
+};
+
+const pickHumanSpawn = (): SpawnCandidate => {
+  let bestCandidate: SpawnCandidate | null = null;
+  let bestScore = -Infinity;
+
+  for (let attempt = 0; attempt < HUMAN_SPAWN_ATTEMPTS; attempt++) {
+    const candidate = createSpawnCandidate(HUMAN_SPAWN_MARGIN);
+    if (isHumanSpawnSafe(candidate.segments)) {
+      return candidate;
+    }
+
+    const score = scoreHumanSpawnCandidate(candidate.segments);
+    if (score > bestScore) {
+      bestScore = score;
+      bestCandidate = candidate;
+    }
+  }
+
+  if (bestCandidate) {
+    return bestCandidate;
+  }
+
+  return createSpawnCandidate(HUMAN_SPAWN_MARGIN);
 };
 
 const spawnBot = (): Player => {
@@ -352,6 +458,7 @@ const foods = new Map<string, Food>();
 const playerViewports = new Map<string, ViewportSize>();
 const knownPlayerIdsBySocket = new Map<string, Set<string>>();
 const knownFoodIdsBySocket = new Map<string, Set<string>>();
+const spawnProtectionUntilByPlayerId = new Map<string, number>();
 
 let foodIdCounter = 0;
 let foodCount = 0; // O(1) counter instead of foods.size each tick
@@ -372,6 +479,18 @@ const isWithinAoi = (origin: Vector2, target: Vector2): boolean => {
   return dx * dx + dy * dy < AOI_RADIUS_SQ;
 };
 
+const isPlayerSpawnProtected = (playerId: string, now: number): boolean => {
+  const protectedUntil = spawnProtectionUntilByPlayerId.get(playerId);
+  if (!protectedUntil) {
+    return false;
+  }
+  if (protectedUntil <= now) {
+    spawnProtectionUntilByPlayerId.delete(playerId);
+    return false;
+  }
+  return true;
+};
+
 const spawnFood = (count: number): Food[] => {
   const spawned: Food[] = [];
   for (let i = 0; i < count; i++) {
@@ -390,6 +509,44 @@ const spawnFood = (count: number): Food[] => {
   return spawned;
 };
 
+const createWorldSummary = (): WorldSummary => ({
+  players: Array.from(players.values()).map((player) => ({
+    id: player.id,
+    name: player.name,
+    appearance: player.appearance,
+    position: { ...player.segments[0] },
+    score: player.score,
+  })),
+  foodCount,
+  worldSize: WORLD_SIZE,
+});
+
+const serializeStateForPlayer = (playerId: string): GameState => {
+  const player = players.get(playerId);
+  if (!player) {
+    return {
+      players: {},
+      foods: {},
+      worldSize: WORLD_SIZE,
+    };
+  }
+
+  const head = player.segments[0];
+  const visiblePlayers = Array.from(players.values()).filter((candidate) =>
+    candidate.id === playerId || isWithinAoi(head, candidate.segments[0]),
+  );
+  const visibleFoods = foodGrid
+    .query(head.x, head.y, AOI_RADIUS)
+    .filter((entry) => foods.has(entry.id))
+    .map((entry) => entry.food);
+
+  return {
+    players: Object.fromEntries(visiblePlayers.map((candidate) => [candidate.id, candidate])),
+    foods: Object.fromEntries(visibleFoods.map((food) => [food.id, food])),
+    worldSize: WORLD_SIZE,
+  };
+};
+
 // Convert Maps to Records for serialization (used only on init)
 const serializeState = (): GameState => ({
   players: Object.fromEntries(players),
@@ -404,15 +561,7 @@ io.on('connection', (socket) => {
   console.log(`Player connected: ${socket.id}`);
   playerViewports.set(socket.id, normalizeViewport(socket.handshake.auth?.viewport));
 
-  const startPos = randomPosition();
-  const startDir = { x: 1, y: 0 };
-  const segments: Vector2[] = [];
-  for (let i = 0; i < INITIAL_SNAKE_LENGTH; i++) {
-    segments.push({
-      x: startPos.x - i * SEGMENT_DISTANCE,
-      y: startPos.y,
-    });
-  }
+  const { startDir, segments } = pickHumanSpawn();
 
   const rawName = (socket.handshake.auth?.name || '').toString().trim().slice(0, 16);
   const playerName = rawName || `Player ${Math.floor(Math.random() * 1000)}`;
@@ -432,11 +581,12 @@ io.on('connection', (socket) => {
   };
 
   players.set(socket.id, newPlayer);
+  spawnProtectionUntilByPlayerId.set(socket.id, Date.now() + SPAWN_PROTECTION_MS);
 
-  // Full state snapshot for the new client (converted from Maps → Records)
-  socket.emit('init', { id: socket.id, state: serializeState() });
-  knownPlayerIdsBySocket.set(socket.id, new Set(players.keys()));
-  knownFoodIdsBySocket.set(socket.id, new Set(foods.keys()));
+  const initialState = serializeStateForPlayer(socket.id);
+  socket.emit('init', { id: socket.id, state: initialState, summary: createWorldSummary() });
+  knownPlayerIdsBySocket.set(socket.id, new Set(Object.keys(initialState.players)));
+  knownFoodIdsBySocket.set(socket.id, new Set(Object.keys(initialState.foods)));
 
   pendingNewPlayers.push(newPlayer);
 
@@ -464,6 +614,7 @@ io.on('connection', (socket) => {
     playerViewports.delete(socket.id);
     knownPlayerIdsBySocket.delete(socket.id);
     knownFoodIdsBySocket.delete(socket.id);
+    spawnProtectionUntilByPlayerId.delete(socket.id);
     pendingRemovedPlayerIds.push(socket.id);
   });
 });
@@ -477,6 +628,8 @@ let foodGridAge = 0;
 const FOOD_GRID_REBUILD_INTERVAL = 30; // full rebuild every ~1 second
 
 const stepGame = (dt: number, delta: DeltaUpdate) => {
+  const tickNow = Date.now();
+
   // ── Spawn bots to fill the world ──────────────────────────────────
   let aliveCount = 0;
   for (const p of players.values()) {
@@ -516,7 +669,7 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
   // ── Rebuild segment grid ──────────────────────────────────────────
   segmentGrid.clear();
   for (const [pid, p] of players) {
-    if (p.isDead) continue;
+    if (p.isDead || isPlayerSpawnProtected(pid, tickNow)) continue;
     for (let i = 0; i < p.segments.length; i++) {
       segmentGrid.insert(p.segments[i].x, p.segments[i].y, {
         playerId: pid,
@@ -531,6 +684,7 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
 
   for (const [playerId, player] of players) {
     if (player.isDead) continue;
+    const isProtected = isPlayerSpawnProtected(playerId, tickNow);
 
     // Smoothly rotate velocity towards targetDirection
     const currentAngle = Math.atan2(player.velocity.y, player.velocity.x);
@@ -552,7 +706,7 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
     }
 
     const head = player.segments[0];
-    const canBoost = player.isBoosting && player.segments.length > BOOST_MIN_LENGTH;
+    const canBoost = !isProtected && player.isBoosting && player.segments.length > BOOST_MIN_LENGTH;
     const speed = canBoost ? SNAKE_SPEED * BOOST_SPEED_MULTIPLIER : SNAKE_SPEED;
 
     const newHead = {
@@ -617,47 +771,48 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
     };
 
     // Check collision with other players and own body via spatial grid
-    const SELF_SKIP_SEGMENTS = 20;
-    const nearbySegments = segmentGrid.query(newHead.x, newHead.y, 15);
-    for (const entry of nearbySegments) {
-      // Skip nearby neck segments for self-collision (head is always touching them)
-      if (entry.playerId === playerId && entry.segmentIndex < SELF_SKIP_SEGMENTS) continue;
-      const other = entry.playerId === playerId ? player : players.get(entry.playerId);
-      if (!other || other.isDead) continue;
+    if (!isProtected) {
+      const nearbySegments = segmentGrid.query(newHead.x, newHead.y, 15);
+      for (const entry of nearbySegments) {
+        if (entry.playerId === playerId) continue;
+        const other = players.get(entry.playerId);
+        if (!other || other.isDead) continue;
 
-      const dx = newHead.x - entry.segment.x;
-      const dy = newHead.y - entry.segment.y;
-      const distSq = dx * dx + dy * dy;
+        const dx = newHead.x - entry.segment.x;
+        const dy = newHead.y - entry.segment.y;
+        const distSq = dx * dx + dy * dy;
 
-      if (distSq < 225) {
-        player.isDead = true;
-        delta.removedPlayerIds.push(playerId);
-        deadPlayerIds.push(playerId);
-        delete delta.playerUpdates[playerId];
+        if (distSq < 225) {
+          player.isDead = true;
+          delta.removedPlayerIds.push(playerId);
+          deadPlayerIds.push(playerId);
+          delete delta.playerUpdates[playerId];
+          spawnProtectionUntilByPlayerId.delete(playerId);
 
-        // Tell the player who killed them
-        if (!isBot(playerId)) {
-          const killerName = entry.playerId === playerId ? 'yourself' : (other?.name || 'Unknown');
-          io.to(playerId).emit('killed', { killerName });
-        }
-        
-        // Spawn food where player died
-        player.segments.forEach((seg, index) => {
-          if (index % 2 === 0) {
-            const id = generateFoodId();
-            const newFood: Food = {
-              id,
-              position: { ...seg },
-              value: 3,
-              hue: player.hue,
-            };
-            foods.set(id, newFood);
-            foodCount++;
-            foodGrid.insert(newFood.position.x, newFood.position.y, { id, food: newFood });
-            delta.newFoods.push(newFood);
+          // Tell the player who killed them
+          if (!isBot(playerId)) {
+            const killerName = other?.name || 'Unknown';
+            io.to(playerId).emit('killed', { killerName });
           }
-        });
-        break;
+          
+          // Spawn food where player died
+          player.segments.forEach((seg, index) => {
+            if (index % 2 === 0) {
+              const id = generateFoodId();
+              const newFood: Food = {
+                id,
+                position: { ...seg },
+                value: 3,
+                hue: player.hue,
+              };
+              foods.set(id, newFood);
+              foodCount++;
+              foodGrid.insert(newFood.position.x, newFood.position.y, { id, food: newFood });
+              delta.newFoods.push(newFood);
+            }
+          });
+          break;
+        }
       }
     }
   }
@@ -665,6 +820,7 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
   // Remove dead players — delete from Map directly (no second pass needed)
   for (const id of deadPlayerIds) {
     players.delete(id);
+    spawnProtectionUntilByPlayerId.delete(id);
   }
 };
 
@@ -817,6 +973,7 @@ const updateGame = () => {
     removedPlayerIds: [...pendingRemovedPlayerIds],
     newFoods: [],
     removedFoodIds: [],
+    summary: createWorldSummary(),
   };
 
   pendingNewPlayers = [];
@@ -826,6 +983,8 @@ const updateGame = () => {
     stepGame(FIXED_DT, delta);
     accumulatedTime -= FIXED_DT;
   }
+
+  delta.summary = createWorldSummary();
 
   emitDelta(delta);
 };
