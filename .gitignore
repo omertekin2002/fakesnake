@@ -7,3 +7,4 @@ coverage/
 .env*
 !.env.example
 progress.md
+progress.md
