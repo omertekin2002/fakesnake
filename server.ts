@@ -350,6 +350,8 @@ const io = new Server(httpServer, {
 const players = new Map<string, Player>();
 const foods = new Map<string, Food>();
 const playerViewports = new Map<string, ViewportSize>();
+const knownPlayerIdsBySocket = new Map<string, Set<string>>();
+const knownFoodIdsBySocket = new Map<string, Set<string>>();
 
 let foodIdCounter = 0;
 let foodCount = 0; // O(1) counter instead of foods.size each tick
@@ -363,6 +365,12 @@ const randomPosition = (): Vector2 => ({
 const generateFoodId = () => `f${foodIdCounter++}`;
 
 const randomHue = () => Math.floor(Math.random() * 360);
+
+const isWithinAoi = (origin: Vector2, target: Vector2): boolean => {
+  const dx = target.x - origin.x;
+  const dy = target.y - origin.y;
+  return dx * dx + dy * dy < AOI_RADIUS_SQ;
+};
 
 const spawnFood = (count: number): Food[] => {
   const spawned: Food[] = [];
@@ -427,6 +435,8 @@ io.on('connection', (socket) => {
 
   // Full state snapshot for the new client (converted from Maps → Records)
   socket.emit('init', { id: socket.id, state: serializeState() });
+  knownPlayerIdsBySocket.set(socket.id, new Set(players.keys()));
+  knownFoodIdsBySocket.set(socket.id, new Set(foods.keys()));
 
   pendingNewPlayers.push(newPlayer);
 
@@ -452,6 +462,8 @@ io.on('connection', (socket) => {
     console.log(`Player disconnected: ${socket.id}`);
     players.delete(socket.id);
     playerViewports.delete(socket.id);
+    knownPlayerIdsBySocket.delete(socket.id);
+    knownFoodIdsBySocket.delete(socket.id);
     pendingRemovedPlayerIds.push(socket.id);
   });
 });
@@ -670,15 +682,36 @@ const emitDelta = (delta: DeltaUpdate) => {
   // ── Per-client viewport-culled deltas ───────────────────────────────
   for (const [socketId, socket] of io.sockets.sockets) {
     const player = players.get(socketId);
+    const knownPlayerIds = knownPlayerIdsBySocket.get(socketId) ?? new Set<string>();
+    const knownFoodIds = knownFoodIdsBySocket.get(socketId) ?? new Set<string>();
+    knownPlayerIdsBySocket.set(socketId, knownPlayerIds);
+    knownFoodIdsBySocket.set(socketId, knownFoodIds);
 
     if (!player) {
       // Dead or transitional — send full delta so client detects death
+      for (const playerId of delta.newPlayers.map((entry) => entry.id)) knownPlayerIds.add(playerId);
+      for (const food of delta.newFoods) knownFoodIds.add(food.id);
+      for (const playerId of delta.removedPlayerIds) knownPlayerIds.delete(playerId);
+      for (const foodId of delta.removedFoodIds) knownFoodIds.delete(foodId);
       socket.emit('delta', delta);
       continue;
     }
 
     const hx = player.segments[0].x;
     const hy = player.segments[0].y;
+    const origin = { x: hx, y: hy };
+
+    const outgoingNewPlayers: Player[] = [];
+    const seenNewPlayerIds = new Set<string>();
+
+    const enqueuePlayerIfUnknown = (candidate: Player | undefined) => {
+      if (!candidate || knownPlayerIds.has(candidate.id) || seenNewPlayerIds.has(candidate.id)) {
+        return;
+      }
+      outgoingNewPlayers.push(candidate);
+      seenNewPlayerIds.add(candidate.id);
+      knownPlayerIds.add(candidate.id);
+    };
 
     // Filter playerUpdates by AOI (always include own update)
     let filteredUpdates = delta.playerUpdates;
@@ -688,37 +721,81 @@ const emitDelta = (delta: DeltaUpdate) => {
       for (const pid of updateKeys) {
         if (pid === socketId) {
           filteredUpdates[pid] = delta.playerUpdates[pid];
+          enqueuePlayerIfUnknown(players.get(pid));
           continue;
         }
         const other = players.get(pid);
         if (!other) continue;
-        const dx = other.segments[0].x - hx;
-        const dy = other.segments[0].y - hy;
-        if (dx * dx + dy * dy < AOI_RADIUS_SQ) {
+        if (isWithinAoi(origin, other.segments[0])) {
           filteredUpdates[pid] = delta.playerUpdates[pid];
+          enqueuePlayerIfUnknown(other);
         }
+      }
+    } else if (updateKeys.length === 1) {
+      enqueuePlayerIfUnknown(players.get(updateKeys[0]));
+    }
+
+    for (const candidate of delta.newPlayers) {
+      if (candidate.id === socketId || isWithinAoi(origin, candidate.segments[0])) {
+        enqueuePlayerIfUnknown(candidate);
       }
     }
 
-    // Filter newFoods by AOI
-    let filteredNewFoods = delta.newFoods;
-    if (delta.newFoods.length > 0) {
-      filteredNewFoods = delta.newFoods.filter((food) => {
-        const dx = food.position.x - hx;
-        const dy = food.position.y - hy;
-        return dx * dx + dy * dy < AOI_RADIUS_SQ;
-      });
+    // Filter new foods by AOI and also reveal previously-unsent food when it becomes relevant.
+    const outgoingNewFoods: Food[] = [];
+    const seenNewFoodIds = new Set<string>();
+    const enqueueFoodIfUnknown = (food: Food | undefined) => {
+      if (!food || knownFoodIds.has(food.id) || seenNewFoodIds.has(food.id)) {
+        return;
+      }
+      outgoingNewFoods.push(food);
+      seenNewFoodIds.add(food.id);
+      knownFoodIds.add(food.id);
+    };
+
+    for (const food of delta.newFoods) {
+      if (isWithinAoi(origin, food.position)) {
+        enqueueFoodIfUnknown(food);
+      }
     }
 
-    if (filteredUpdates === delta.playerUpdates && filteredNewFoods === delta.newFoods) {
+    const nearbyFoods = foodGrid.query(hx, hy, AOI_RADIUS);
+    for (const entry of nearbyFoods) {
+      enqueueFoodIfUnknown(entry.food);
+    }
+
+    const outgoingRemovedPlayerIds = delta.removedPlayerIds.filter((playerId) => {
+      if (!knownPlayerIds.has(playerId)) {
+        return false;
+      }
+      knownPlayerIds.delete(playerId);
+      return true;
+    });
+
+    const outgoingRemovedFoodIds = delta.removedFoodIds.filter((foodId) => {
+      if (!knownFoodIds.has(foodId)) {
+        return false;
+      }
+      knownFoodIds.delete(foodId);
+      return true;
+    });
+
+    const shouldSendOriginalDelta =
+      filteredUpdates === delta.playerUpdates &&
+      outgoingNewPlayers.length === delta.newPlayers.length &&
+      outgoingNewFoods.length === delta.newFoods.length &&
+      outgoingRemovedPlayerIds.length === delta.removedPlayerIds.length &&
+      outgoingRemovedFoodIds.length === delta.removedFoodIds.length;
+
+    if (shouldSendOriginalDelta) {
       socket.emit('delta', delta);
     } else {
       socket.emit('delta', {
         playerUpdates: filteredUpdates,
-        newPlayers: delta.newPlayers,
-        removedPlayerIds: delta.removedPlayerIds,
-        newFoods: filteredNewFoods,
-        removedFoodIds: delta.removedFoodIds,
+        newPlayers: outgoingNewPlayers,
+        removedPlayerIds: outgoingRemovedPlayerIds,
+        newFoods: outgoingNewFoods,
+        removedFoodIds: outgoingRemovedFoodIds,
       });
     }
   }

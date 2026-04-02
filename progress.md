@@ -19,4 +19,5 @@ Original prompt: Can you add a start screen so the player isn't immidiately put 
 - Added shared snake appearance presets so players and bots now carry palette, pattern, and tail-taper data through the network model.
 - Replaced flat single-color snake bodies with tapered per-segment rendering, palette-based gradients, and stripe patterns in the canvas renderer.
 - Added menu-side customization controls and a live preview so players can choose palette, pattern, and tail shape before spawning.
+- Reduced residual delta broadcast waste by tracking which players and foods each socket has actually been told about, then filtering `newPlayers`, `newFoods`, and matching removal IDs per client.
 - TODO: If we later want keyboard-friendly menu navigation, add an Enter key handler for `Start Game`.
