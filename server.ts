@@ -37,6 +37,8 @@ const MIN_VIEWPORT_HEIGHT = 240;
 const MAX_VIEWPORT_WIDTH = 2560;
 const MAX_VIEWPORT_HEIGHT = 1440;
 const DEFAULT_VIEWPORT = { width: 1280, height: 720 };
+const FIXED_DT = 1 / TICK_RATE;
+const MAX_ACCUMULATED_TIME = 0.25;
 const BOT_NAMES = [
   'Slinky', 'Noodle', 'Zigzag', 'Slithers', 'Hissy',
   'Coil', 'Viper', 'Fang', 'Scales', 'Twisty',
@@ -449,25 +451,11 @@ let pendingNewPlayers: Player[] = [];
 let pendingRemovedPlayerIds: string[] = [];
 
 let lastTime = Date.now();
+let accumulatedTime = 0;
 let foodGridAge = 0;
 const FOOD_GRID_REBUILD_INTERVAL = 30; // full rebuild every ~1 second
 
-const updateGame = () => {
-  const now = Date.now();
-  const dt = (now - lastTime) / 1000;
-  lastTime = now;
-
-  const delta: DeltaUpdate = {
-    playerUpdates: {},
-    newPlayers: [...pendingNewPlayers],
-    removedPlayerIds: [...pendingRemovedPlayerIds],
-    newFoods: [],
-    removedFoodIds: [],
-  };
-
-  pendingNewPlayers = [];
-  pendingRemovedPlayerIds = [];
-
+const stepGame = (dt: number, delta: DeltaUpdate) => {
   // ── Spawn bots to fill the world ──────────────────────────────────
   let aliveCount = 0;
   for (const p of players.values()) {
@@ -657,6 +645,18 @@ const updateGame = () => {
   for (const id of deadPlayerIds) {
     players.delete(id);
   }
+};
+
+const emitDelta = (delta: DeltaUpdate) => {
+  if (
+    Object.keys(delta.playerUpdates).length === 0 &&
+    delta.newPlayers.length === 0 &&
+    delta.removedPlayerIds.length === 0 &&
+    delta.newFoods.length === 0 &&
+    delta.removedFoodIds.length === 0
+  ) {
+    return;
+  }
 
   // ── Per-client viewport-culled deltas ───────────────────────────────
   for (const [socketId, socket] of io.sockets.sockets) {
@@ -713,6 +713,35 @@ const updateGame = () => {
       });
     }
   }
+};
+
+const updateGame = () => {
+  const now = Date.now();
+  const elapsed = Math.min((now - lastTime) / 1000, MAX_ACCUMULATED_TIME);
+  lastTime = now;
+  accumulatedTime += elapsed;
+
+  if (accumulatedTime < FIXED_DT) {
+    return;
+  }
+
+  const delta: DeltaUpdate = {
+    playerUpdates: {},
+    newPlayers: [...pendingNewPlayers],
+    removedPlayerIds: [...pendingRemovedPlayerIds],
+    newFoods: [],
+    removedFoodIds: [],
+  };
+
+  pendingNewPlayers = [];
+  pendingRemovedPlayerIds = [];
+
+  while (accumulatedTime >= FIXED_DT) {
+    stepGame(FIXED_DT, delta);
+    accumulatedTime -= FIXED_DT;
+  }
+
+  emitDelta(delta);
 };
 
 setInterval(updateGame, 1000 / TICK_RATE);

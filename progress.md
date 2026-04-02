@@ -13,4 +13,7 @@ Original prompt: Can you add a start screen so the player isn't immidiately put 
 - Revalidated in-browser: both the on-screen `Exit` button and the `Escape` key return from live play back to `menu`.
 - Moved the in-game score label lower so it no longer overlaps the top-left `Exit` button.
 - Moved the in-game score label to the bottom-left corner to fully separate it from the top-left `Exit` button.
+- Added guarded bot respawn placement on the server so bots retry spawning away from live human players instead of appearing directly in front of them.
+- Extended bot spawn safety to each live human player's current viewport, with the client reporting window size so bots stay off-screen on spawn.
+- Switched server movement to a fixed 30 Hz timestep so brief stalls no longer create oversized per-tick snake jumps and visible body gaps.
 - TODO: If we later want keyboard-friendly menu navigation, add an Enter key handler for `Start Game`.
