@@ -21,6 +21,8 @@ const SEGMENT_DISTANCE = 200 / 30; // SNAKE_SPEED / TICK_RATE
 const SPATIAL_CELL_SIZE = 50;
 const BOOST_SPEED_MULTIPLIER = 2;
 const BOOST_MIN_LENGTH = 10;
+const AOI_RADIUS = 1200;
+const AOI_RADIUS_SQ = AOI_RADIUS * AOI_RADIUS;
 const TARGET_PLAYER_COUNT = 8;
 const BOT_PREFIX = 'bot_';
 const BOT_FOOD_SEARCH_RADIUS = 250;
@@ -486,7 +488,61 @@ const updateGame = () => {
     players.delete(id);
   }
 
-  io.emit('delta', delta);
+  // ── Per-client viewport-culled deltas ───────────────────────────────
+  for (const [socketId, socket] of io.sockets.sockets) {
+    const player = players.get(socketId);
+
+    if (!player) {
+      // Dead or transitional — send full delta so client detects death
+      socket.emit('delta', delta);
+      continue;
+    }
+
+    const hx = player.segments[0].x;
+    const hy = player.segments[0].y;
+
+    // Filter playerUpdates by AOI (always include own update)
+    let filteredUpdates = delta.playerUpdates;
+    const updateKeys = Object.keys(delta.playerUpdates);
+    if (updateKeys.length > 1) {
+      filteredUpdates = {};
+      for (const pid of updateKeys) {
+        if (pid === socketId) {
+          filteredUpdates[pid] = delta.playerUpdates[pid];
+          continue;
+        }
+        const other = players.get(pid);
+        if (!other) continue;
+        const dx = other.segments[0].x - hx;
+        const dy = other.segments[0].y - hy;
+        if (dx * dx + dy * dy < AOI_RADIUS_SQ) {
+          filteredUpdates[pid] = delta.playerUpdates[pid];
+        }
+      }
+    }
+
+    // Filter newFoods by AOI
+    let filteredNewFoods = delta.newFoods;
+    if (delta.newFoods.length > 0) {
+      filteredNewFoods = delta.newFoods.filter((food) => {
+        const dx = food.position.x - hx;
+        const dy = food.position.y - hy;
+        return dx * dx + dy * dy < AOI_RADIUS_SQ;
+      });
+    }
+
+    if (filteredUpdates === delta.playerUpdates && filteredNewFoods === delta.newFoods) {
+      socket.emit('delta', delta);
+    } else {
+      socket.emit('delta', {
+        playerUpdates: filteredUpdates,
+        newPlayers: delta.newPlayers,
+        removedPlayerIds: delta.removedPlayerIds,
+        newFoods: filteredNewFoods,
+        removedFoodIds: delta.removedFoodIds,
+      });
+    }
+  }
 };
 
 setInterval(updateGame, 1000 / TICK_RATE);
