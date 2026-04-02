@@ -12,6 +12,7 @@ export interface Player {
   targetDirection: Vector2;
   score: number;
   isDead: boolean;
+  isBoosting: boolean;
 }
 
 export interface Food {
@@ -33,7 +34,7 @@ export interface ClientInput {
 
 export interface PlayerTickUpdate {
   newHead: Vector2;
-  removeTail: boolean;
+  removeTail: number;
   score: number;
   velocity: Vector2;
 }

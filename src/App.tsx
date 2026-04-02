@@ -6,6 +6,9 @@ const WORLD_SIZE = 3000;
 const GRID_SIZE = 50;
 const MENU_DRIFT_RANGE = 18;
 const INPUT_THROTTLE_MS = 1000 / 30; // match server tick rate
+const TICK_MS = 1000 / 30;
+
+type InterpState = { prevX: number; prevY: number; currX: number; currY: number };
 
 type GamePhase = 'menu' | 'connecting' | 'playing' | 'dead';
 
@@ -16,6 +19,23 @@ type MenuFood = {
   hue: number;
   driftOffset: number;
   driftSpeed: number;
+};
+
+type ScoreParticle = {
+  x: number;
+  y: number;
+  value: number;
+  createdAt: number;
+};
+
+type DeathParticle = {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  radius: number;
+  hue: number;
+  createdAt: number;
 };
 
 declare global {
@@ -118,7 +138,7 @@ const applyDelta = (localState: GameState, delta: DeltaUpdate): void => {
 
     const update = delta.playerUpdates[playerId];
     player.segments.unshift(update.newHead);
-    if (update.removeTail) {
+    for (let i = 0; i < update.removeTail; i++) {
       player.segments.pop();
     }
     player.score = update.score;
@@ -142,14 +162,21 @@ export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const socketRef = useRef<Socket | null>(null);
   const menuFoodsRef = useRef<MenuFood[]>([]);
+  const particlesRef = useRef<ScoreParticle[]>([]);
+  const deathParticlesRef = useRef<DeathParticle[]>([]);
+  const interpRef = useRef<Map<string, InterpState>>(new Map());
+  const lastDeltaTimeRef = useRef(0);
 
   // Game state lives in a ref — no React re-renders per tick
   const gameStateRef = useRef<GameState | null>(null);
   const myIdRef = useRef<string | null>(null);
+  const playerNameRef = useRef('');
 
   // UI-level state that needs React renders
   const [score, setScore] = useState(0);
   const [phase, setPhase] = useState<GamePhase>('menu');
+  const [playerName, setPlayerName] = useState('');
+  const [killedBy, setKilledBy] = useState<string | null>(null);
   const [sessionVersion, setSessionVersion] = useState(0);
   const [windowSize, setWindowSize] = useState({ width: window.innerWidth, height: window.innerHeight });
 
@@ -159,8 +186,11 @@ export default function App() {
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    canvas.width = windowSize.width;
-    canvas.height = windowSize.height;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = windowSize.width * dpr;
+    canvas.height = windowSize.height * dpr;
+    canvas.style.width = `${windowSize.width}px`;
+    canvas.style.height = `${windowSize.height}px`;
   }, [windowSize.width, windowSize.height]);
 
   useEffect(() => {
@@ -175,6 +205,10 @@ export default function App() {
   useEffect(() => {
     menuFoodsRef.current = createMenuFoods(windowSize.width, windowSize.height);
   }, [windowSize.height, windowSize.width]);
+
+  useEffect(() => {
+    playerNameRef.current = playerName;
+  }, [playerName]);
 
   useEffect(() => {
     window.render_game_to_text = () => {
@@ -200,7 +234,9 @@ export default function App() {
       return;
     }
 
-    const newSocket = io(window.location.origin);
+    const newSocket = io(window.location.origin, {
+      auth: { name: playerNameRef.current.trim() || undefined },
+    });
     socketRef.current = newSocket;
 
     newSocket.on('init', (data: { id: string; state: GameState }) => {
@@ -213,20 +249,77 @@ export default function App() {
       const localState = gameStateRef.current;
       if (!localState) return;
 
+      // Spawn particles before applying delta (positions still available)
+      const myId = myIdRef.current;
+      const me = myId ? localState.players[myId] : null;
+      const now = performance.now();
+
+      // Score particles for food we ate
+      if (me && delta.removedFoodIds.length > 0) {
+        const head = me.segments[0];
+        for (const foodId of delta.removedFoodIds) {
+          const food = localState.foods[foodId];
+          if (!food) continue;
+          const dx = food.position.x - head.x;
+          const dy = food.position.y - head.y;
+          if (dx * dx + dy * dy < 900) {
+            particlesRef.current.push({ x: food.position.x, y: food.position.y, value: food.value, createdAt: now });
+          }
+        }
+      }
+
+      // Death particles for dying snakes
+      if (delta.removedPlayerIds.length > 0) {
+        const dp = deathParticlesRef.current;
+        for (const pid of delta.removedPlayerIds) {
+          const dying = localState.players[pid];
+          if (!dying) continue;
+          const segs = dying.segments;
+          // Spawn 2-3 particles per segment, sample every 3rd segment
+          for (let i = 0; i < segs.length; i += 3) {
+            const seg = segs[i];
+            for (let j = 0; j < 3; j++) {
+              const angle = Math.random() * Math.PI * 2;
+              const speed = 40 + Math.random() * 80;
+              dp.push({
+                x: seg.x, y: seg.y,
+                vx: Math.cos(angle) * speed,
+                vy: Math.sin(angle) * speed,
+                radius: 2 + Math.random() * 4,
+                hue: dying.hue,
+                createdAt: now,
+              });
+            }
+          }
+        }
+      }
+
+      // Save interpolation state before applying delta
+      const interpMap = interpRef.current;
+      for (const playerId in delta.playerUpdates) {
+        const player = localState.players[playerId];
+        if (!player) continue;
+        const prev = player.segments[0];
+        const curr = delta.playerUpdates[playerId].newHead;
+        interpMap.set(playerId, { prevX: prev.x, prevY: prev.y, currX: curr.x, currY: curr.y });
+      }
+      for (const pid of delta.removedPlayerIds) {
+        interpMap.delete(pid);
+      }
+      lastDeltaTimeRef.current = now;
+
       applyDelta(localState, delta);
 
-      const myId = myIdRef.current;
       if (myId && localState.players[myId]) {
         setScore(localState.players[myId].score);
       } else if (myId && !localState.players[myId]) {
         setPhase('dead');
+        // killedBy may already be set by the 'killed' event; if not, it stays null
       }
     });
 
-    newSocket.on('playerDied', (id: string) => {
-      if (id === newSocket.id) {
-        setPhase('dead');
-      }
+    newSocket.on('killed', (data: { killerName: string }) => {
+      setKilledBy(data.killerName);
     });
 
     return () => {
@@ -243,26 +336,51 @@ export default function App() {
     }
 
     let lastEmitTime = 0;
+    const mousePos = { x: 0, y: 0 };
+    let boosting = false;
+
+    const emitInput = () => {
+      const socket = socketRef.current;
+      if (socket) socket.emit('input', { x: mousePos.x, y: mousePos.y, boost: boosting });
+    };
 
     const handleMouseMove = (e: MouseEvent) => {
+      if (!canvasRef.current) return;
+      const rect = canvasRef.current.getBoundingClientRect();
+      mousePos.x = e.clientX - rect.left - windowSize.width / 2;
+      mousePos.y = e.clientY - rect.top - windowSize.height / 2;
+
       const now = performance.now();
       if (now - lastEmitTime < INPUT_THROTTLE_MS) return;
       lastEmitTime = now;
+      emitInput();
+    };
 
-      if (!canvasRef.current) return;
-
-      const socket = socketRef.current;
-      if (!socket) return;
-
-      const rect = canvasRef.current.getBoundingClientRect();
-      const x = e.clientX - rect.left - windowSize.width / 2;
-      const y = e.clientY - rect.top - windowSize.height / 2;
-
-      socket.emit('input', { x, y });
+    const handleMouseDown = (e: MouseEvent) => {
+      if (e.button === 0) { boosting = true; emitInput(); }
+    };
+    const handleMouseUp = (e: MouseEvent) => {
+      if (e.button === 0) { boosting = false; emitInput(); }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'Space' && !e.repeat) { e.preventDefault(); boosting = true; emitInput(); }
+    };
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space') { boosting = false; emitInput(); }
     };
 
     window.addEventListener('mousemove', handleMouseMove);
-    return () => window.removeEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mousedown', handleMouseDown);
+    window.addEventListener('mouseup', handleMouseUp);
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mousedown', handleMouseDown);
+      window.removeEventListener('mouseup', handleMouseUp);
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
   }, [phase, windowSize.height, windowSize.width]);
 
   const returnToMenu = useCallback(() => {
@@ -302,6 +420,8 @@ export default function App() {
     }
 
     let animationFrameId = 0;
+    let leaderboardCache: { top5: Player[]; myRank: number } | null = null;
+    let leaderboardCacheTime = 0;
 
     const renderMenuScene = (time: number) => {
       ctx.fillStyle = '#1a1a1a';
@@ -338,6 +458,9 @@ export default function App() {
     };
 
     const render = (time: number) => {
+      const dpr = window.devicePixelRatio || 1;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
       const gameState = gameStateRef.current;
       const myId = myIdRef.current;
       const me = myId && gameState ? gameState.players[myId] : null;
@@ -351,8 +474,22 @@ export default function App() {
       ctx.fillStyle = '#1a1a1a';
       ctx.fillRect(0, 0, windowSize.width, windowSize.height);
 
-      const cameraX = me.segments[0].x - windowSize.width / 2;
-      const cameraY = me.segments[0].y - windowSize.height / 2;
+      // ── Interpolation factor ──────────────────────────────────────
+      const interpMap = interpRef.current;
+      const interpT = Math.min((time - lastDeltaTimeRef.current) / TICK_MS, 1);
+
+      const lerpHead = (id: string, fallback: { x: number; y: number }) => {
+        const s = interpMap.get(id);
+        if (!s) return fallback;
+        return {
+          x: s.prevX + (s.currX - s.prevX) * interpT,
+          y: s.prevY + (s.currY - s.prevY) * interpT,
+        };
+      };
+
+      const myHead = lerpHead(myId!, me.segments[0]);
+      const cameraX = myHead.x - windowSize.width / 2;
+      const cameraY = myHead.y - windowSize.height / 2;
 
       ctx.save();
       ctx.translate(-cameraX, -cameraY);
@@ -378,7 +515,7 @@ export default function App() {
       // ── Optimized snake rendering: batch body segments per player ──
       for (const playerId in gameState.players) {
         const player = gameState.players[playerId];
-        const head = player.segments[0];
+        const head = lerpHead(playerId, player.segments[0]);
         const playerColor = hueToHsl(player.hue);
 
         // Batch all body segments (index > 0) into a single path
@@ -410,22 +547,34 @@ export default function App() {
           ctx.arc(head.x, head.y, 15, 0, Math.PI * 2);
           ctx.fill();
 
-          // Eyes
-          const eyeOffset = 5;
+          // Eyes — rotated to face movement direction
+          const angle = Math.atan2(player.velocity.y, player.velocity.x);
+          const fx = Math.cos(angle), fy = Math.sin(angle);   // forward
+          const px = -fy, py = fx;                             // perpendicular (left)
+
+          const eyeForward = 5, eyeSpread = 5;
+          const lx = head.x + fx * eyeForward + px * eyeSpread;
+          const ly = head.y + fy * eyeForward + py * eyeSpread;
+          const rx = head.x + fx * eyeForward - px * eyeSpread;
+          const ry = head.y + fy * eyeForward - py * eyeSpread;
+
           ctx.fillStyle = 'white';
           ctx.beginPath();
-          ctx.moveTo(head.x - eyeOffset + 4, head.y - eyeOffset);
-          ctx.arc(head.x - eyeOffset, head.y - eyeOffset, 4, 0, Math.PI * 2);
-          ctx.moveTo(head.x + eyeOffset + 4, head.y - eyeOffset);
-          ctx.arc(head.x + eyeOffset, head.y - eyeOffset, 4, 0, Math.PI * 2);
+          ctx.moveTo(lx + 4, ly);
+          ctx.arc(lx, ly, 4, 0, Math.PI * 2);
+          ctx.moveTo(rx + 4, ry);
+          ctx.arc(rx, ry, 4, 0, Math.PI * 2);
           ctx.fill();
 
+          const pupilOffset = 1.5;
+          const plx = lx + fx * pupilOffset, ply = ly + fy * pupilOffset;
+          const prx = rx + fx * pupilOffset, pry = ry + fy * pupilOffset;
           ctx.fillStyle = 'black';
           ctx.beginPath();
-          ctx.moveTo(head.x - eyeOffset + 2, head.y - eyeOffset);
-          ctx.arc(head.x - eyeOffset, head.y - eyeOffset, 2, 0, Math.PI * 2);
-          ctx.moveTo(head.x + eyeOffset + 2, head.y - eyeOffset);
-          ctx.arc(head.x + eyeOffset, head.y - eyeOffset, 2, 0, Math.PI * 2);
+          ctx.moveTo(plx + 2, ply);
+          ctx.arc(plx, ply, 2, 0, Math.PI * 2);
+          ctx.moveTo(prx + 2, pry);
+          ctx.arc(prx, pry, 2, 0, Math.PI * 2);
           ctx.fill();
         }
 
@@ -443,6 +592,50 @@ export default function App() {
         }
       }
 
+      // ── Score particles ───────────────────────────────────────────
+      const PARTICLE_DURATION = 800;
+      const particles = particlesRef.current;
+      const now = performance.now();
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        const age = now - p.createdAt;
+        if (age > PARTICLE_DURATION) {
+          particles.splice(i, 1);
+          continue;
+        }
+        const t = age / PARTICLE_DURATION;
+        const alpha = 1 - t;
+        const rise = t * 30;
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = 'hsl(50, 100%, 70%)';
+        ctx.font = 'bold 16px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText(`+${p.value}`, p.x, p.y - 20 - rise);
+      }
+      ctx.globalAlpha = 1;
+
+      // ── Death particles ───────────────────────────────────────────
+      const DEATH_DURATION = 900;
+      const deathParts = deathParticlesRef.current;
+      for (let i = deathParts.length - 1; i >= 0; i--) {
+        const dp = deathParts[i];
+        const age = now - dp.createdAt;
+        if (age > DEATH_DURATION) {
+          deathParts.splice(i, 1);
+          continue;
+        }
+        const t = age / DEATH_DURATION;
+        const ease = 1 - (1 - t) * (1 - t); // ease-out
+        const px = dp.x + dp.vx * ease;
+        const py = dp.y + dp.vy * ease;
+        ctx.globalAlpha = 1 - t;
+        ctx.fillStyle = hueToHsl(dp.hue);
+        ctx.beginPath();
+        ctx.arc(px, py, dp.radius * (1 - t * 0.5), 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+
       ctx.restore();
 
       ctx.fillStyle = 'white';
@@ -450,18 +643,91 @@ export default function App() {
       ctx.textAlign = 'left';
       ctx.fillText(`Score: ${me.score}`, 20, windowSize.height - 24);
 
-      const sortedPlayers = (Object.values(gameState.players) as Player[])
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 5);
+      const playerCount = Object.keys(gameState.players).length;
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+      ctx.font = '14px Arial';
+      ctx.fillText(`${playerCount} player${playerCount !== 1 ? 's' : ''} alive`, 20, windowSize.height - 50);
+
+      if (!leaderboardCache || now - leaderboardCacheTime > 500) {
+        const sorted = (Object.values(gameState.players) as Player[])
+          .sort((a, b) => b.score - a.score);
+        leaderboardCache = { top5: sorted.slice(0, 5), myRank: sorted.findIndex((p) => p.id === myId) + 1 };
+        leaderboardCacheTime = now;
+      }
+      const { top5, myRank } = leaderboardCache;
 
       ctx.textAlign = 'right';
       ctx.fillText('Leaderboard', windowSize.width - 20, 30);
       ctx.font = '16px Arial';
 
-      sortedPlayers.forEach((player, index) => {
+      top5.forEach((player, index) => {
         ctx.fillStyle = player.id === myId ? 'yellow' : 'white';
         ctx.fillText(`${index + 1}. ${player.name}: ${player.score}`, windowSize.width - 20, 60 + index * 25);
       });
+
+      if (myRank > 5) {
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+        ctx.fillText('···', windowSize.width - 20, 60 + 5 * 25);
+        ctx.fillStyle = 'yellow';
+        ctx.fillText(`${myRank}. ${me.name}: ${me.score}`, windowSize.width - 20, 60 + 6 * 25);
+      }
+
+      // ── Minimap ───────────────────────────────────────────────────
+      const mmSize = 140;
+      const mmPad = 14;
+      const mmX = windowSize.width - mmSize - mmPad;
+      const mmY = windowSize.height - mmSize - mmPad;
+      const mmScale = mmSize / WORLD_SIZE;
+
+      // Background
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+      ctx.fillRect(mmX, mmY, mmSize, mmSize);
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(mmX, mmY, mmSize, mmSize);
+
+      // Food dots (batched)
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+      ctx.beginPath();
+      for (const foodId in gameState.foods) {
+        const food = gameState.foods[foodId];
+        const fx = mmX + food.position.x * mmScale;
+        const fy = mmY + food.position.y * mmScale;
+        ctx.moveTo(fx + 1, fy);
+        ctx.arc(fx, fy, 1, 0, Math.PI * 2);
+      }
+      ctx.fill();
+
+      // Other players (heads only)
+      for (const pid in gameState.players) {
+        const p = gameState.players[pid];
+        const ph = p.segments[0];
+        const px = mmX + ph.x * mmScale;
+        const py = mmY + ph.y * mmScale;
+
+        if (pid === myId) continue;
+        ctx.fillStyle = hueToHsl(p.hue);
+        ctx.beginPath();
+        ctx.arc(px, py, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Self (bright, slightly larger)
+      const mx = mmX + myHead.x * mmScale;
+      const my = mmY + myHead.y * mmScale;
+      ctx.fillStyle = 'white';
+      ctx.beginPath();
+      ctx.arc(mx, my, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Viewport rectangle
+      const vpX = mmX + cameraX * mmScale;
+      const vpY = mmY + cameraY * mmScale;
+      const vpW = windowSize.width * mmScale;
+      const vpH = windowSize.height * mmScale;
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(vpX, vpY, vpW, vpH);
 
       animationFrameId = requestAnimationFrame(render);
     };
@@ -477,6 +743,7 @@ export default function App() {
     gameStateRef.current = null;
     myIdRef.current = null;
     setScore(0);
+    setKilledBy(null);
     setPhase('connecting');
     setSessionVersion((value) => value + 1);
   };
@@ -495,6 +762,15 @@ export default function App() {
               <h1 className="text-5xl font-black uppercase tracking-[0.22em] text-white sm:text-7xl [text-shadow:0_0_30px_rgba(16,185,129,0.35)]">
                 Lil Snake Game
               </h1>
+              <input
+                type="text"
+                value={playerName}
+                onChange={(e) => setPlayerName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') startGame(); }}
+                placeholder="Enter your name"
+                maxLength={16}
+                className="w-64 rounded-md border border-white/20 bg-black/40 px-4 py-3 text-center text-lg text-white placeholder-white/40 outline-none focus:border-emerald-400/60"
+              />
               <button
                 id="start-btn"
                 onClick={startGame}
@@ -525,7 +801,12 @@ export default function App() {
 
         {phase === 'dead' && (
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/72 backdrop-blur-sm">
-            <h2 className="mb-4 text-5xl font-bold text-red-500">Game Over</h2>
+            <h2 className="mb-2 text-5xl font-bold text-red-500">Game Over</h2>
+            {killedBy && (
+              <p className="mb-2 text-lg text-red-300/80">
+                Killed by {killedBy}
+              </p>
+            )}
             <p className="mb-8 text-xl">Final Score: {score}</p>
             <div className="flex flex-wrap items-center justify-center gap-4">
               <button

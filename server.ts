@@ -19,6 +19,94 @@ const FOOD_COUNT = 500;
 const FOOD_SPAWN_RATE = 10; // per second
 const SEGMENT_DISTANCE = 200 / 30; // SNAKE_SPEED / TICK_RATE
 const SPATIAL_CELL_SIZE = 50;
+const BOOST_SPEED_MULTIPLIER = 2;
+const BOOST_MIN_LENGTH = 10;
+const TARGET_PLAYER_COUNT = 8;
+const BOT_PREFIX = 'bot_';
+const BOT_FOOD_SEARCH_RADIUS = 250;
+const BOT_WALL_MARGIN = 200;
+const BOT_NAMES = [
+  'Slinky', 'Noodle', 'Zigzag', 'Slithers', 'Hissy',
+  'Coil', 'Viper', 'Fang', 'Scales', 'Twisty',
+  'Pretzel', 'Wriggles', 'Danger Noodle', 'Spaghetti', 'Sneky',
+];
+
+let botIdCounter = 0;
+
+const isBot = (id: string) => id.startsWith(BOT_PREFIX);
+
+const spawnBot = (): Player => {
+  const id = `${BOT_PREFIX}${botIdCounter++}`;
+  const startPos = randomPosition();
+  const angle = Math.random() * Math.PI * 2;
+  const startDir = { x: Math.cos(angle), y: Math.sin(angle) };
+  const segments: Vector2[] = [];
+  for (let i = 0; i < INITIAL_SNAKE_LENGTH; i++) {
+    segments.push({
+      x: startPos.x - startDir.x * i * SEGMENT_DISTANCE,
+      y: startPos.y - startDir.y * i * SEGMENT_DISTANCE,
+    });
+  }
+
+  return {
+    id,
+    name: BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)],
+    hue: randomHue(),
+    segments,
+    velocity: startDir,
+    targetDirection: startDir,
+    score: 0,
+    isDead: false,
+    isBoosting: false,
+  };
+};
+
+const updateBotAI = (player: Player): void => {
+  const head = player.segments[0];
+
+  // Avoid walls — steer toward center when near edges
+  let steerX = 0, steerY = 0;
+  if (head.x < BOT_WALL_MARGIN) steerX += 1;
+  if (head.x > WORLD_SIZE - BOT_WALL_MARGIN) steerX -= 1;
+  if (head.y < BOT_WALL_MARGIN) steerY += 1;
+  if (head.y > WORLD_SIZE - BOT_WALL_MARGIN) steerY -= 1;
+
+  if (steerX !== 0 || steerY !== 0) {
+    const len = Math.sqrt(steerX * steerX + steerY * steerY);
+    player.targetDirection = { x: steerX / len, y: steerY / len };
+    return;
+  }
+
+  // Seek nearest food
+  const nearby = foodGrid.query(head.x, head.y, BOT_FOOD_SEARCH_RADIUS);
+  let bestFood: Food | null = null;
+  let bestDistSq = Infinity;
+  for (const entry of nearby) {
+    const dx = entry.food.position.x - head.x;
+    const dy = entry.food.position.y - head.y;
+    const distSq = dx * dx + dy * dy;
+    if (distSq < bestDistSq) {
+      bestDistSq = distSq;
+      bestFood = entry.food;
+    }
+  }
+
+  if (bestFood) {
+    const dx = bestFood.position.x - head.x;
+    const dy = bestFood.position.y - head.y;
+    const len = Math.sqrt(dx * dx + dy * dy);
+    if (len > 0) {
+      player.targetDirection = { x: dx / len, y: dy / len };
+    }
+    return;
+  }
+
+  // Wander — occasionally pick a new random-ish direction
+  if (Math.random() < 0.02) {
+    const angle = Math.atan2(player.velocity.y, player.velocity.x) + (Math.random() - 0.5) * 1.5;
+    player.targetDirection = { x: Math.cos(angle), y: Math.sin(angle) };
+  }
+};
 
 // ── Spatial Hash Grid ────────────────────────────────────────────────
 class SpatialGrid<T> {
@@ -113,6 +201,7 @@ const spawnFood = (count: number): Food[] => {
     };
     foods.set(id, food);
     foodCount++;
+    foodGrid.insert(food.position.x, food.position.y, { id, food });
     spawned.push(food);
   }
   return spawned;
@@ -141,15 +230,19 @@ io.on('connection', (socket) => {
     });
   }
 
+  const rawName = (socket.handshake.auth?.name || '').toString().trim().slice(0, 16);
+  const playerName = rawName || `Player ${Math.floor(Math.random() * 1000)}`;
+
   const newPlayer: Player = {
     id: socket.id,
-    name: `Player ${Math.floor(Math.random() * 1000)}`,
+    name: playerName,
     hue: randomHue(),
     segments,
     velocity: startDir,
     targetDirection: startDir,
     score: 0,
     isDead: false,
+    isBoosting: false,
   };
 
   players.set(socket.id, newPlayer);
@@ -159,16 +252,17 @@ io.on('connection', (socket) => {
 
   pendingNewPlayers.push(newPlayer);
 
-  socket.on('input', (targetDirection: Vector2) => {
+  socket.on('input', (data: { x: number; y: number; boost?: boolean }) => {
     const player = players.get(socket.id);
     if (player && !player.isDead) {
-      const length = Math.sqrt(targetDirection.x ** 2 + targetDirection.y ** 2);
+      const length = Math.sqrt(data.x ** 2 + data.y ** 2);
       if (length > 0) {
         player.targetDirection = {
-          x: targetDirection.x / length,
-          y: targetDirection.y / length,
+          x: data.x / length,
+          y: data.y / length,
         };
       }
+      player.isBoosting = !!data.boost;
     }
   });
 
@@ -183,6 +277,8 @@ let pendingNewPlayers: Player[] = [];
 let pendingRemovedPlayerIds: string[] = [];
 
 let lastTime = Date.now();
+let foodGridAge = 0;
+const FOOD_GRID_REBUILD_INTERVAL = 30; // full rebuild every ~1 second
 
 const updateGame = () => {
   const now = Date.now();
@@ -200,18 +296,43 @@ const updateGame = () => {
   pendingNewPlayers = [];
   pendingRemovedPlayerIds = [];
 
+  // ── Spawn bots to fill the world ──────────────────────────────────
+  let aliveCount = 0;
+  for (const p of players.values()) {
+    if (!p.isDead) aliveCount++;
+  }
+  while (aliveCount < TARGET_PLAYER_COUNT) {
+    const bot = spawnBot();
+    players.set(bot.id, bot);
+    delta.newPlayers.push(bot);
+    aliveCount++;
+  }
+
   // Maintain food count
   if (foodCount < FOOD_COUNT) {
     const spawned = spawnFood(Math.min(FOOD_SPAWN_RATE, FOOD_COUNT - foodCount));
     delta.newFoods.push(...spawned);
   }
 
-  // ── Rebuild spatial grids ──────────────────────────────────────────
-  foodGrid.clear();
-  for (const [foodId, food] of foods) {
-    foodGrid.insert(food.position.x, food.position.y, { id: foodId, food });
+  // ── Maintain food grid incrementally; full purge every ~1s ─────────
+  foodGridAge++;
+  if (foodGridAge >= FOOD_GRID_REBUILD_INTERVAL) {
+    foodGrid.clear();
+    for (const [foodId, food] of foods) {
+      foodGrid.insert(food.position.x, food.position.y, { id: foodId, food });
+    }
+    foodGridAge = 0;
+  }
+  // New food from spawnFood() is already inserted by spawnFood() itself.
+  // Death/boost food is inserted inline below where it's created.
+
+  // ── Update bot AI ─────────────────────────────────────────────────
+  for (const [playerId, player] of players) {
+    if (player.isDead || !isBot(playerId)) continue;
+    updateBotAI(player);
   }
 
+  // ── Rebuild segment grid ──────────────────────────────────────────
   segmentGrid.clear();
   for (const [pid, p] of players) {
     if (p.isDead) continue;
@@ -250,10 +371,12 @@ const updateGame = () => {
     }
 
     const head = player.segments[0];
-    
+    const canBoost = player.isBoosting && player.segments.length > BOOST_MIN_LENGTH;
+    const speed = canBoost ? SNAKE_SPEED * BOOST_SPEED_MULTIPLIER : SNAKE_SPEED;
+
     const newHead = {
-      x: head.x + player.velocity.x * SNAKE_SPEED * dt,
-      y: head.y + player.velocity.y * SNAKE_SPEED * dt,
+      x: head.x + player.velocity.x * speed * dt,
+      y: head.y + player.velocity.y * speed * dt,
     };
 
     newHead.x = Math.max(0, Math.min(WORLD_SIZE, newHead.x));
@@ -280,24 +403,45 @@ const updateGame = () => {
     // Determine target length based on score
     const targetLength = INITIAL_SNAKE_LENGTH + Math.floor(player.score * 2);
 
-    let removedTail = false;
+    let tailsRemoved = 0;
     if (player.segments.length > targetLength) {
       player.segments.pop();
-      removedTail = true;
+      tailsRemoved++;
+    }
+
+    // Boost: shed a tail segment as food each tick
+    if (canBoost) {
+      const shed = player.segments.pop()!;
+      tailsRemoved++;
+      player.score = Math.max(0, player.score - 1);
+
+      const id = generateFoodId();
+      const newFood: Food = {
+        id,
+        position: { ...shed },
+        value: 1,
+        hue: player.hue,
+      };
+      foods.set(id, newFood);
+      foodCount++;
+      foodGrid.insert(newFood.position.x, newFood.position.y, { id, food: newFood });
+      delta.newFoods.push(newFood);
     }
 
     delta.playerUpdates[playerId] = {
       newHead,
-      removeTail: removedTail,
+      removeTail: tailsRemoved,
       score: player.score,
       velocity: { ...player.velocity },
     };
 
-    // Check collision with other players via spatial grid
+    // Check collision with other players and own body via spatial grid
+    const SELF_SKIP_SEGMENTS = 20;
     const nearbySegments = segmentGrid.query(newHead.x, newHead.y, 15);
     for (const entry of nearbySegments) {
-      if (entry.playerId === playerId) continue;
-      const other = players.get(entry.playerId);
+      // Skip nearby neck segments for self-collision (head is always touching them)
+      if (entry.playerId === playerId && entry.segmentIndex < SELF_SKIP_SEGMENTS) continue;
+      const other = entry.playerId === playerId ? player : players.get(entry.playerId);
       if (!other || other.isDead) continue;
 
       const dx = newHead.x - entry.segment.x;
@@ -308,6 +452,13 @@ const updateGame = () => {
         player.isDead = true;
         delta.removedPlayerIds.push(playerId);
         deadPlayerIds.push(playerId);
+        delete delta.playerUpdates[playerId];
+
+        // Tell the player who killed them
+        if (!isBot(playerId)) {
+          const killerName = entry.playerId === playerId ? 'yourself' : (other?.name || 'Unknown');
+          io.to(playerId).emit('killed', { killerName });
+        }
         
         // Spawn food where player died
         player.segments.forEach((seg, index) => {
@@ -321,6 +472,7 @@ const updateGame = () => {
             };
             foods.set(id, newFood);
             foodCount++;
+            foodGrid.insert(newFood.position.x, newFood.position.y, { id, food: newFood });
             delta.newFoods.push(newFood);
           }
         });
