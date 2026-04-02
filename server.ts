@@ -27,6 +27,16 @@ const TARGET_PLAYER_COUNT = 8;
 const BOT_PREFIX = 'bot_';
 const BOT_FOOD_SEARCH_RADIUS = 250;
 const BOT_WALL_MARGIN = 200;
+const BOT_SPAWN_MARGIN = 350;
+const BOT_SPAWN_HEAD_SAFE_RADIUS = 900;
+const BOT_SPAWN_SEGMENT_SAFE_RADIUS = 260;
+const BOT_SPAWN_VIEWPORT_MARGIN = 120;
+const BOT_SPAWN_ATTEMPTS = 80;
+const MIN_VIEWPORT_WIDTH = 320;
+const MIN_VIEWPORT_HEIGHT = 240;
+const MAX_VIEWPORT_WIDTH = 2560;
+const MAX_VIEWPORT_HEIGHT = 1440;
+const DEFAULT_VIEWPORT = { width: 1280, height: 720 };
 const BOT_NAMES = [
   'Slinky', 'Noodle', 'Zigzag', 'Slithers', 'Hissy',
   'Coil', 'Viper', 'Fang', 'Scales', 'Twisty',
@@ -37,11 +47,43 @@ let botIdCounter = 0;
 
 const isBot = (id: string) => id.startsWith(BOT_PREFIX);
 
-const spawnBot = (): Player => {
-  const id = `${BOT_PREFIX}${botIdCounter++}`;
-  const startPos = randomPosition();
-  const angle = Math.random() * Math.PI * 2;
-  const startDir = { x: Math.cos(angle), y: Math.sin(angle) };
+type ViewportSize = { width: number; height: number };
+
+const distanceSq = (a: Vector2, b: Vector2): number => {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  return dx * dx + dy * dy;
+};
+
+const clampViewportDimension = (value: unknown, min: number, max: number, fallback: number): number => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(parsed)));
+};
+
+const normalizeViewport = (value: unknown): ViewportSize => {
+  if (!value || typeof value !== 'object') {
+    return { ...DEFAULT_VIEWPORT };
+  }
+
+  const maybeViewport = value as { width?: unknown; height?: unknown };
+  return {
+    width: clampViewportDimension(
+      maybeViewport.width,
+      MIN_VIEWPORT_WIDTH,
+      MAX_VIEWPORT_WIDTH,
+      DEFAULT_VIEWPORT.width,
+    ),
+    height: clampViewportDimension(
+      maybeViewport.height,
+      MIN_VIEWPORT_HEIGHT,
+      MAX_VIEWPORT_HEIGHT,
+      DEFAULT_VIEWPORT.height,
+    ),
+  };
+};
+
+const buildInitialSegments = (startPos: Vector2, startDir: Vector2): Vector2[] => {
   const segments: Vector2[] = [];
   for (let i = 0; i < INITIAL_SNAKE_LENGTH; i++) {
     segments.push({
@@ -49,6 +91,127 @@ const spawnBot = (): Player => {
       y: startPos.y - startDir.y * i * SEGMENT_DISTANCE,
     });
   }
+  return segments;
+};
+
+const randomSpawnPosition = (margin = 0): Vector2 => ({
+  x: margin + Math.random() * (WORLD_SIZE - margin * 2),
+  y: margin + Math.random() * (WORLD_SIZE - margin * 2),
+});
+
+const isPointInsideViewport = (point: Vector2, head: Vector2, viewport: ViewportSize): boolean => {
+  const halfWidth = viewport.width / 2 + BOT_SPAWN_VIEWPORT_MARGIN;
+  const halfHeight = viewport.height / 2 + BOT_SPAWN_VIEWPORT_MARGIN;
+
+  return (
+    point.x >= head.x - halfWidth &&
+    point.x <= head.x + halfWidth &&
+    point.y >= head.y - halfHeight &&
+    point.y <= head.y + halfHeight
+  );
+};
+
+const scoreBotSpawnCandidate = (segments: Vector2[]): number => {
+  const botHead = segments[0];
+  let minDistSq = Infinity;
+  let viewportPenalty = 0;
+
+  for (const [playerId, player] of players) {
+    if (player.isDead || isBot(playerId)) continue;
+
+    const viewport = playerViewports.get(playerId) ?? DEFAULT_VIEWPORT;
+    if (isPointInsideViewport(botHead, player.segments[0], viewport)) {
+      viewportPenalty += 100;
+    }
+
+    minDistSq = Math.min(minDistSq, distanceSq(botHead, player.segments[0]));
+
+    for (let i = 0; i < player.segments.length; i += 5) {
+      minDistSq = Math.min(minDistSq, distanceSq(botHead, player.segments[i]));
+    }
+
+    for (let i = 0; i < segments.length; i += 5) {
+      if (isPointInsideViewport(segments[i], player.segments[0], viewport)) {
+        viewportPenalty += 10;
+      }
+      minDistSq = Math.min(minDistSq, distanceSq(segments[i], player.segments[0]));
+    }
+  }
+
+  return minDistSq - viewportPenalty * WORLD_SIZE * WORLD_SIZE;
+};
+
+const isBotSpawnSafe = (segments: Vector2[]): boolean => {
+  const headRadiusSq = BOT_SPAWN_HEAD_SAFE_RADIUS * BOT_SPAWN_HEAD_SAFE_RADIUS;
+  const segmentRadiusSq = BOT_SPAWN_SEGMENT_SAFE_RADIUS * BOT_SPAWN_SEGMENT_SAFE_RADIUS;
+  const botHead = segments[0];
+
+  for (const [playerId, player] of players) {
+    if (player.isDead || isBot(playerId)) continue;
+
+    const viewport = playerViewports.get(playerId) ?? DEFAULT_VIEWPORT;
+
+    if (distanceSq(botHead, player.segments[0]) < headRadiusSq) {
+      return false;
+    }
+
+    if (isPointInsideViewport(botHead, player.segments[0], viewport)) {
+      return false;
+    }
+
+    for (let i = 0; i < player.segments.length; i += 5) {
+      if (distanceSq(botHead, player.segments[i]) < segmentRadiusSq) {
+        return false;
+      }
+    }
+
+    for (let i = 0; i < segments.length; i += 5) {
+      if (isPointInsideViewport(segments[i], player.segments[0], viewport)) {
+        return false;
+      }
+      if (distanceSq(segments[i], player.segments[0]) < segmentRadiusSq) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+};
+
+const pickBotSpawn = (): { startPos: Vector2; startDir: Vector2; segments: Vector2[] } => {
+  let bestCandidate: { startPos: Vector2; startDir: Vector2; segments: Vector2[] } | null = null;
+  let bestScore = -Infinity;
+
+  for (let attempt = 0; attempt < BOT_SPAWN_ATTEMPTS; attempt++) {
+    const startPos = randomSpawnPosition(BOT_SPAWN_MARGIN);
+    const angle = Math.random() * Math.PI * 2;
+    const startDir = { x: Math.cos(angle), y: Math.sin(angle) };
+    const segments = buildInitialSegments(startPos, startDir);
+
+    if (isBotSpawnSafe(segments)) {
+      return { startPos, startDir, segments };
+    }
+
+    const score = scoreBotSpawnCandidate(segments);
+    if (score > bestScore) {
+      bestScore = score;
+      bestCandidate = { startPos, startDir, segments };
+    }
+  }
+
+  if (bestCandidate) {
+    return bestCandidate;
+  }
+
+  const startPos = randomSpawnPosition(BOT_SPAWN_MARGIN);
+  const angle = Math.random() * Math.PI * 2;
+  const startDir = { x: Math.cos(angle), y: Math.sin(angle) };
+  return { startPos, startDir, segments: buildInitialSegments(startPos, startDir) };
+};
+
+const spawnBot = (): Player => {
+  const id = `${BOT_PREFIX}${botIdCounter++}`;
+  const { startDir, segments } = pickBotSpawn();
 
   return {
     id,
@@ -177,6 +340,7 @@ const io = new Server(httpServer, {
 // ── Server-side state using Maps for faster iteration/deletion ──────
 const players = new Map<string, Player>();
 const foods = new Map<string, Food>();
+const playerViewports = new Map<string, ViewportSize>();
 
 let foodIdCounter = 0;
 let foodCount = 0; // O(1) counter instead of foods.size each tick
@@ -221,6 +385,7 @@ spawnFood(FOOD_COUNT);
 
 io.on('connection', (socket) => {
   console.log(`Player connected: ${socket.id}`);
+  playerViewports.set(socket.id, normalizeViewport(socket.handshake.auth?.viewport));
 
   const startPos = randomPosition();
   const startDir = { x: 1, y: 0 };
@@ -268,9 +433,14 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('viewport', (data: { width?: number; height?: number }) => {
+    playerViewports.set(socket.id, normalizeViewport(data));
+  });
+
   socket.on('disconnect', () => {
     console.log(`Player disconnected: ${socket.id}`);
     players.delete(socket.id);
+    playerViewports.delete(socket.id);
     pendingRemovedPlayerIds.push(socket.id);
   });
 });

@@ -211,6 +211,10 @@ export default function App() {
   }, [playerName]);
 
   useEffect(() => {
+    socketRef.current?.emit('viewport', windowSize);
+  }, [windowSize]);
+
+  useEffect(() => {
     window.render_game_to_text = () => {
       const gs = gameStateRef.current;
       return JSON.stringify({
@@ -235,7 +239,10 @@ export default function App() {
     }
 
     const newSocket = io(window.location.origin, {
-      auth: { name: playerNameRef.current.trim() || undefined },
+      auth: {
+        name: playerNameRef.current.trim() || undefined,
+        viewport: windowSize,
+      },
     });
     socketRef.current = newSocket;
 
