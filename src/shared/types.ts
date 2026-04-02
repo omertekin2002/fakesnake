@@ -1,3 +1,5 @@
+import { SnakeAppearance } from './skins';
+
 export interface Vector2 {
   x: number;
   y: number;
@@ -7,6 +9,7 @@ export interface Player {
   id: string;
   name: string;
   hue: number;
+  appearance: SnakeAppearance;
   segments: Vector2[];
   velocity: Vector2;
   targetDirection: Vector2;

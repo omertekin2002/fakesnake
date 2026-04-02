@@ -5,6 +5,11 @@ import { Server } from 'socket.io';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { Player, Food, GameState, Vector2, DeltaUpdate } from './src/shared/types.js';
+import {
+  createRandomSnakeAppearance,
+  getSnakePalette,
+  normalizeSnakeAppearance,
+} from './src/shared/skins.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -214,11 +219,13 @@ const pickBotSpawn = (): { startPos: Vector2; startDir: Vector2; segments: Vecto
 const spawnBot = (): Player => {
   const id = `${BOT_PREFIX}${botIdCounter++}`;
   const { startDir, segments } = pickBotSpawn();
+  const appearance = createRandomSnakeAppearance();
 
   return {
     id,
     name: BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)],
-    hue: randomHue(),
+    hue: getSnakePalette(appearance.paletteId).foodHue,
+    appearance,
     segments,
     velocity: startDir,
     targetDirection: startDir,
@@ -401,11 +408,13 @@ io.on('connection', (socket) => {
 
   const rawName = (socket.handshake.auth?.name || '').toString().trim().slice(0, 16);
   const playerName = rawName || `Player ${Math.floor(Math.random() * 1000)}`;
+  const appearance = normalizeSnakeAppearance(socket.handshake.auth?.appearance);
 
   const newPlayer: Player = {
     id: socket.id,
     name: playerName,
-    hue: randomHue(),
+    hue: getSnakePalette(appearance.paletteId).foodHue,
+    appearance,
     segments,
     velocity: startDir,
     targetDirection: startDir,

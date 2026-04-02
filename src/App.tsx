@@ -1,6 +1,16 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { GameState, Player, DeltaUpdate } from './shared/types';
+import {
+  DEFAULT_SNAKE_APPEARANCE,
+  getSnakePalette,
+  getSnakePattern,
+  getSnakeTaper,
+  SNAKE_PALETTE_IDS,
+  SNAKE_PATTERN_IDS,
+  SNAKE_TAPER_IDS,
+  SnakeAppearance,
+} from './shared/skins';
 
 const WORLD_SIZE = 3000;
 const GRID_SIZE = 50;
@@ -34,7 +44,7 @@ type DeathParticle = {
   vx: number;
   vy: number;
   radius: number;
-  hue: number;
+  color: string;
   createdAt: number;
 };
 
@@ -46,6 +56,121 @@ declare global {
 
 // ── Hue-to-HSL conversion (shared helper) ────────────────────────────
 const hueToHsl = (hue: number) => `hsl(${hue}, 80%, 60%)`;
+
+type Rgb = { r: number; g: number; b: number };
+
+const hexToRgb = (hex: string): Rgb => {
+  const normalized = hex.replace('#', '');
+  const source = normalized.length === 3
+    ? normalized.split('').map((char) => `${char}${char}`).join('')
+    : normalized;
+
+  const value = Number.parseInt(source, 16);
+  return {
+    r: (value >> 16) & 255,
+    g: (value >> 8) & 255,
+    b: value & 255,
+  };
+};
+
+const rgbToCss = ({ r, g, b }: Rgb): string => `rgb(${r}, ${g}, ${b})`;
+
+const mixColors = (from: string, to: string, amount: number): string => {
+  const start = hexToRgb(from);
+  const end = hexToRgb(to);
+  const t = Math.max(0, Math.min(1, amount));
+
+  return rgbToCss({
+    r: Math.round(start.r + (end.r - start.r) * t),
+    g: Math.round(start.g + (end.g - start.g) * t),
+    b: Math.round(start.b + (end.b - start.b) * t),
+  });
+};
+
+const withAlpha = (hex: string, alpha: number): string => {
+  const color = hexToRgb(hex);
+  return `rgba(${color.r}, ${color.g}, ${color.b}, ${alpha})`;
+};
+
+const getSegmentProgress = (segmentIndex: number, totalSegments: number): number => {
+  if (totalSegments <= 1) return 0;
+  return Math.max(0, Math.min(1, segmentIndex / (totalSegments - 1)));
+};
+
+const getPatternStrength = (
+  segmentIndex: number,
+  totalSegments: number,
+  appearance: SnakeAppearance,
+): number => {
+  const mode = getSnakePattern(appearance.patternId).mode;
+  const progress = getSegmentProgress(segmentIndex, totalSegments);
+
+  switch (mode) {
+    case 'bands':
+      return segmentIndex % 7 < 2 ? 0.9 : 0.12;
+    case 'tiger':
+      return Math.sin(segmentIndex * 0.9 + progress * 5) > 0.22 ? 0.82 : 0.08;
+    case 'saddle':
+      return segmentIndex % 10 < 4 ? 0.72 : (progress > 0.72 ? 0.35 : 0.08);
+    case 'racer':
+      return segmentIndex % 6 === 0 ? 1 : (segmentIndex % 3 === 0 ? 0.34 : 0.04);
+    default:
+      return 0.1;
+  }
+};
+
+const getSegmentRadius = (
+  segmentIndex: number,
+  totalSegments: number,
+  appearance: SnakeAppearance,
+  headRadius: number,
+): number => {
+  const taper = getSnakeTaper(appearance.taperId);
+  const progress = getSegmentProgress(segmentIndex, totalSegments);
+  const scale = 1 - (1 - taper.tailScale) * Math.pow(progress, taper.curve);
+  return Math.max(headRadius * 0.22, headRadius * 0.85 * scale);
+};
+
+const getSegmentColor = (
+  segmentIndex: number,
+  totalSegments: number,
+  appearance: SnakeAppearance,
+): string => {
+  const palette = getSnakePalette(appearance.paletteId);
+  const progress = getSegmentProgress(segmentIndex, totalSegments);
+  const base = mixColors(palette.primary, palette.secondary, 0.18 + progress * 0.45);
+  const stripeStrength = getPatternStrength(segmentIndex, totalSegments, appearance);
+  return mixColors(base, palette.stripe, stripeStrength);
+};
+
+const drawSegmentCircle = (
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  radius: number,
+  fillColor: string,
+  highlightColor: string,
+) => {
+  const gradient = ctx.createRadialGradient(
+    x - radius * 0.38,
+    y - radius * 0.42,
+    radius * 0.15,
+    x,
+    y,
+    radius,
+  );
+  gradient.addColorStop(0, mixColors(fillColor, highlightColor, 0.72));
+  gradient.addColorStop(0.52, fillColor);
+  gradient.addColorStop(1, mixColors(fillColor, '#050505', 0.28));
+
+  ctx.fillStyle = gradient;
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = withAlpha(highlightColor, 0.22);
+  ctx.lineWidth = Math.max(1, radius * 0.08);
+  ctx.stroke();
+};
 
 const createMenuFoods = (width: number, height: number): MenuFood[] => {
   const count = Math.max(35, Math.floor((width * height) / 22000));
@@ -171,11 +296,13 @@ export default function App() {
   const gameStateRef = useRef<GameState | null>(null);
   const myIdRef = useRef<string | null>(null);
   const playerNameRef = useRef('');
+  const appearanceRef = useRef<SnakeAppearance>(DEFAULT_SNAKE_APPEARANCE);
 
   // UI-level state that needs React renders
   const [score, setScore] = useState(0);
   const [phase, setPhase] = useState<GamePhase>('menu');
   const [playerName, setPlayerName] = useState('');
+  const [appearance, setAppearance] = useState<SnakeAppearance>(DEFAULT_SNAKE_APPEARANCE);
   const [killedBy, setKilledBy] = useState<string | null>(null);
   const [sessionVersion, setSessionVersion] = useState(0);
   const [windowSize, setWindowSize] = useState({ width: window.innerWidth, height: window.innerHeight });
@@ -211,6 +338,10 @@ export default function App() {
   }, [playerName]);
 
   useEffect(() => {
+    appearanceRef.current = appearance;
+  }, [appearance]);
+
+  useEffect(() => {
     socketRef.current?.emit('viewport', windowSize);
   }, [windowSize]);
 
@@ -223,6 +354,7 @@ export default function App() {
         score,
         players: gs ? Object.keys(gs.players).length : 0,
         foods: gs ? Object.keys(gs.foods).length : 0,
+        appearance,
         viewport: windowSize,
         coordinates: 'origin at top-left, +x right, +y down',
       });
@@ -231,7 +363,7 @@ export default function App() {
     return () => {
       delete window.render_game_to_text;
     };
-  }, [phase, score, windowSize]);
+  }, [appearance, phase, score, windowSize]);
 
   useEffect(() => {
     if (sessionVersion === 0) {
@@ -241,6 +373,7 @@ export default function App() {
     const newSocket = io(window.location.origin, {
       auth: {
         name: playerNameRef.current.trim() || undefined,
+        appearance: appearanceRef.current,
         viewport: windowSize,
       },
     });
@@ -285,6 +418,7 @@ export default function App() {
           // Spawn 2-3 particles per segment, sample every 3rd segment
           for (let i = 0; i < segs.length; i += 3) {
             const seg = segs[i];
+            const particleColor = getSnakePalette(dying.appearance?.paletteId ?? DEFAULT_SNAKE_APPEARANCE.paletteId).primary;
             for (let j = 0; j < 3; j++) {
               const angle = Math.random() * Math.PI * 2;
               const speed = 40 + Math.random() * 80;
@@ -293,7 +427,7 @@ export default function App() {
                 vx: Math.cos(angle) * speed,
                 vy: Math.sin(angle) * speed,
                 radius: 2 + Math.random() * 4,
-                hue: dying.hue,
+                color: particleColor,
                 createdAt: now,
               });
             }
@@ -519,15 +653,14 @@ export default function App() {
         }
       }
 
-      // ── Optimized snake rendering: batch body segments per player ──
+      // ── Patterned tapered snake rendering ────────────────────────
       for (const playerId in gameState.players) {
         const player = gameState.players[playerId];
         const head = lerpHead(playerId, player.segments[0]);
-        const playerColor = hueToHsl(player.hue);
+        const skin = player.appearance ?? DEFAULT_SNAKE_APPEARANCE;
+        const palette = getSnakePalette(skin.paletteId);
+        const totalSegments = player.segments.length;
 
-        // Batch all body segments (index > 0) into a single path
-        ctx.fillStyle = playerColor;
-        ctx.beginPath();
         for (let i = player.segments.length - 1; i > 0; i--) {
           const segment = player.segments[i];
           if (
@@ -536,11 +669,11 @@ export default function App() {
             segment.y > cameraY - 30 &&
             segment.y < cameraY + windowSize.height + 30
           ) {
-            ctx.moveTo(segment.x + 12, segment.y);
-            ctx.arc(segment.x, segment.y, 12, 0, Math.PI * 2);
+            const radius = getSegmentRadius(i, totalSegments, skin, 15);
+            const fillColor = getSegmentColor(i, totalSegments, skin);
+            drawSegmentCircle(ctx, segment.x, segment.y, radius, fillColor, palette.highlight);
           }
         }
-        ctx.fill();
 
         // Draw head separately (larger + eyes)
         if (
@@ -549,15 +682,35 @@ export default function App() {
           head.y > cameraY - 30 &&
           head.y < cameraY + windowSize.height + 30
         ) {
-          ctx.fillStyle = playerColor;
-          ctx.beginPath();
-          ctx.arc(head.x, head.y, 15, 0, Math.PI * 2);
-          ctx.fill();
-
           // Eyes — rotated to face movement direction
           const angle = Math.atan2(player.velocity.y, player.velocity.x);
-          const fx = Math.cos(angle), fy = Math.sin(angle);   // forward
-          const px = -fy, py = fx;                             // perpendicular (left)
+          const fx = Math.cos(angle), fy = Math.sin(angle);
+          const px = -fy, py = fx;
+          const headRadius = 15.5;
+          const headColor = mixColors(palette.primary, palette.stripe, 0.24);
+
+          drawSegmentCircle(ctx, head.x, head.y, headRadius, headColor, palette.highlight);
+
+          ctx.save();
+          ctx.translate(head.x, head.y);
+          ctx.rotate(angle);
+          ctx.fillStyle = withAlpha(palette.stripe, 0.72);
+          const patternMode = getSnakePattern(skin.patternId).mode;
+          if (patternMode === 'racer') {
+            ctx.beginPath();
+            ctx.ellipse(-1, 0, 7.5, 3.2, 0, 0, Math.PI * 2);
+          } else if (patternMode === 'tiger') {
+            ctx.beginPath();
+            ctx.ellipse(-4.5, 0, 5, 10.5, 0, 0, Math.PI * 2);
+          } else if (patternMode === 'saddle') {
+            ctx.beginPath();
+            ctx.ellipse(-2.5, 0, 6.5, 8.4, 0, 0, Math.PI * 2);
+          } else {
+            ctx.beginPath();
+            ctx.ellipse(-1.5, 0, 5.8, 8.8, 0, 0, Math.PI * 2);
+          }
+          ctx.fill();
+          ctx.restore();
 
           const eyeForward = 5, eyeSpread = 5;
           const lx = head.x + fx * eyeForward + px * eyeSpread;
@@ -636,7 +789,7 @@ export default function App() {
         const px = dp.x + dp.vx * ease;
         const py = dp.y + dp.vy * ease;
         ctx.globalAlpha = 1 - t;
-        ctx.fillStyle = hueToHsl(dp.hue);
+        ctx.fillStyle = dp.color;
         ctx.beginPath();
         ctx.arc(px, py, dp.radius * (1 - t * 0.5), 0, Math.PI * 2);
         ctx.fill();
@@ -713,7 +866,7 @@ export default function App() {
         const py = mmY + ph.y * mmScale;
 
         if (pid === myId) continue;
-        ctx.fillStyle = hueToHsl(p.hue);
+        ctx.fillStyle = getSnakePalette(p.appearance?.paletteId ?? DEFAULT_SNAKE_APPEARANCE.paletteId).primary;
         ctx.beginPath();
         ctx.arc(px, py, 2.5, 0, Math.PI * 2);
         ctx.fill();
@@ -755,6 +908,23 @@ export default function App() {
     setSessionVersion((value) => value + 1);
   };
 
+  const selectedPalette = getSnakePalette(appearance.paletteId);
+  const selectedPattern = getSnakePattern(appearance.patternId);
+  const selectedTaper = getSnakeTaper(appearance.taperId);
+  const previewSegments = Array.from({ length: 8 }, (_, index) => {
+    const segmentIndex = index + 1;
+    const radius = getSegmentRadius(segmentIndex, 9, appearance, 15);
+    const color = getSegmentColor(segmentIndex, 9, appearance);
+
+    return {
+      key: `preview-${segmentIndex}`,
+      color,
+      size: radius * 2,
+      left: 58 + index * 24,
+      top: 34 - radius,
+    };
+  });
+
   return (
     <div className="flex min-h-screen items-center justify-center overflow-hidden bg-neutral-900 font-sans text-white">
       <div className="relative h-screen w-full overflow-hidden">
@@ -765,23 +935,138 @@ export default function App() {
 
         {phase === 'menu' && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/12">
-            <div className="flex flex-col items-center gap-8 px-6 text-center">
+            <div className="flex w-full max-w-5xl flex-col items-center gap-6 px-6 py-10 text-center">
               <h1 className="text-5xl font-black uppercase tracking-[0.22em] text-white sm:text-7xl [text-shadow:0_0_30px_rgba(16,185,129,0.35)]">
                 Lil Snake Game
               </h1>
-              <input
-                type="text"
-                value={playerName}
-                onChange={(e) => setPlayerName(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') startGame(); }}
-                placeholder="Enter your name"
-                maxLength={16}
-                className="w-64 rounded-md border border-white/20 bg-black/40 px-4 py-3 text-center text-lg text-white placeholder-white/40 outline-none focus:border-emerald-400/60"
-              />
+              <div className="w-full max-w-3xl rounded-3xl border border-white/10 bg-black/45 px-5 py-5 shadow-[0_18px_60px_rgba(0,0,0,0.32)] backdrop-blur-sm">
+                <div className="flex flex-col gap-5">
+                  <div className="flex flex-col items-center gap-2">
+                    <p className="text-xs font-semibold uppercase tracking-[0.28em] text-white/45">Snake Preview</p>
+                    <div className="relative h-20 w-full max-w-md overflow-hidden rounded-2xl border border-white/10 bg-black/30">
+                      <div
+                        className="absolute left-8 rounded-full"
+                        style={{
+                          top: 20,
+                          width: 30,
+                          height: 30,
+                          background: `radial-gradient(circle at 32% 28%, ${selectedPalette.highlight} 0%, ${mixColors(selectedPalette.primary, selectedPalette.stripe, 0.28)} 62%, ${mixColors(selectedPalette.secondary, '#050505', 0.2)} 100%)`,
+                          boxShadow: `0 0 24px ${withAlpha(selectedPalette.primary, 0.28)}`,
+                        }}
+                      />
+                      {previewSegments.map((segment) => (
+                        <div
+                          key={segment.key}
+                          className="absolute rounded-full"
+                          style={{
+                            left: segment.left,
+                            top: segment.top,
+                            width: segment.size,
+                            height: segment.size,
+                            background: `radial-gradient(circle at 32% 28%, ${mixColors(segment.color, selectedPalette.highlight, 0.72)} 0%, ${segment.color} 62%, ${mixColors(segment.color, '#050505', 0.28)} 100%)`,
+                            boxShadow: `0 0 18px ${withAlpha(segment.color, 0.18)}`,
+                          }}
+                        />
+                      ))}
+                    </div>
+                    <p className="text-sm text-white/65">
+                      {selectedPalette.label} · {selectedPattern.label} · {selectedTaper.label}
+                    </p>
+                  </div>
+
+                  <input
+                    type="text"
+                    value={playerName}
+                    onChange={(e) => setPlayerName(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') startGame(); }}
+                    placeholder="Enter your name"
+                    maxLength={16}
+                    className="mx-auto w-full max-w-sm rounded-2xl border border-white/20 bg-black/40 px-4 py-3 text-center text-lg text-white placeholder-white/40 outline-none focus:border-emerald-400/60"
+                  />
+
+                  <div className="grid gap-4 text-left sm:grid-cols-3">
+                    <div className="rounded-2xl border border-white/8 bg-white/4 p-4">
+                      <p className="mb-3 text-xs font-semibold uppercase tracking-[0.24em] text-white/45">Palette</p>
+                      <div className="grid gap-2">
+                        {SNAKE_PALETTE_IDS.map((paletteId) => {
+                          const palette = getSnakePalette(paletteId);
+                          const isSelected = appearance.paletteId === paletteId;
+
+                          return (
+                            <button
+                              key={paletteId}
+                              type="button"
+                              onClick={() => setAppearance((current) => ({ ...current, paletteId }))}
+                              className={`rounded-xl border px-3 py-2 text-left transition ${isSelected ? 'border-white/35 bg-white/10' : 'border-white/10 bg-black/20 hover:border-white/20 hover:bg-white/6'}`}
+                            >
+                              <div className="mb-2 flex gap-2">
+                                {[palette.primary, palette.secondary, palette.stripe].map((color) => (
+                                  <span
+                                    key={color}
+                                    className="h-4 w-4 rounded-full border border-black/20"
+                                    style={{ backgroundColor: color }}
+                                  />
+                                ))}
+                              </div>
+                              <div className="text-sm font-semibold text-white">{palette.label}</div>
+                              <div className="text-xs text-white/50">{palette.description}</div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-white/8 bg-white/4 p-4">
+                      <p className="mb-3 text-xs font-semibold uppercase tracking-[0.24em] text-white/45">Pattern</p>
+                      <div className="grid gap-2">
+                        {SNAKE_PATTERN_IDS.map((patternId) => {
+                          const pattern = getSnakePattern(patternId);
+                          const isSelected = appearance.patternId === patternId;
+
+                          return (
+                            <button
+                              key={patternId}
+                              type="button"
+                              onClick={() => setAppearance((current) => ({ ...current, patternId }))}
+                              className={`rounded-xl border px-3 py-2 text-left transition ${isSelected ? 'border-white/35 bg-white/10' : 'border-white/10 bg-black/20 hover:border-white/20 hover:bg-white/6'}`}
+                            >
+                              <div className="text-sm font-semibold text-white">{pattern.label}</div>
+                              <div className="text-xs text-white/50">{pattern.description}</div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-white/8 bg-white/4 p-4">
+                      <p className="mb-3 text-xs font-semibold uppercase tracking-[0.24em] text-white/45">Tail Shape</p>
+                      <div className="grid gap-2">
+                        {SNAKE_TAPER_IDS.map((taperId) => {
+                          const taper = getSnakeTaper(taperId);
+                          const isSelected = appearance.taperId === taperId;
+
+                          return (
+                            <button
+                              key={taperId}
+                              type="button"
+                              onClick={() => setAppearance((current) => ({ ...current, taperId }))}
+                              className={`rounded-xl border px-3 py-2 text-left transition ${isSelected ? 'border-white/35 bg-white/10' : 'border-white/10 bg-black/20 hover:border-white/20 hover:bg-white/6'}`}
+                            >
+                              <div className="text-sm font-semibold text-white">{taper.label}</div>
+                              <div className="text-xs text-white/50">{taper.description}</div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
               <button
                 id="start-btn"
+                type="button"
                 onClick={startGame}
-                className="rounded-md border border-emerald-300/35 bg-emerald-500 px-8 py-3 text-lg font-semibold text-white transition hover:bg-emerald-400"
+                className="rounded-2xl border border-emerald-300/35 bg-emerald-500 px-10 py-3 text-lg font-semibold text-white transition hover:bg-emerald-400"
               >
                 Start Game
               </button>

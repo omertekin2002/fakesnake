@@ -16,4 +16,7 @@ Original prompt: Can you add a start screen so the player isn't immidiately put 
 - Added guarded bot respawn placement on the server so bots retry spawning away from live human players instead of appearing directly in front of them.
 - Extended bot spawn safety to each live human player's current viewport, with the client reporting window size so bots stay off-screen on spawn.
 - Switched server movement to a fixed 30 Hz timestep so brief stalls no longer create oversized per-tick snake jumps and visible body gaps.
+- Added shared snake appearance presets so players and bots now carry palette, pattern, and tail-taper data through the network model.
+- Replaced flat single-color snake bodies with tapered per-segment rendering, palette-based gradients, and stripe patterns in the canvas renderer.
+- Added menu-side customization controls and a live preview so players can choose palette, pattern, and tail shape before spawning.
 - TODO: If we later want keyboard-friendly menu navigation, add an Enter key handler for `Start Game`.
