@@ -949,40 +949,44 @@ const emitDelta = (delta: DeltaUpdate) => {
 
     const outgoingNewPlayers: Player[] = [];
     const seenNewPlayerIds = new Set<string>();
+    const visiblePlayerIds = new Set<string>([socketId]);
 
-    const enqueuePlayerIfUnknown = (candidate: Player | undefined) => {
+    const enqueuePlayerIfUnknown = (candidate: Player | undefined): boolean => {
       if (!candidate || knownPlayerIds.has(candidate.id) || seenNewPlayerIds.has(candidate.id)) {
-        return;
+        return false;
       }
       outgoingNewPlayers.push(candidate);
       seenNewPlayerIds.add(candidate.id);
       knownPlayerIds.add(candidate.id);
+      return true;
     };
 
     // Filter playerUpdates by AOI (always include own update)
-    let filteredUpdates = delta.playerUpdates;
+    const filteredUpdates: DeltaUpdate['playerUpdates'] = {};
     const updateKeys = Object.keys(delta.playerUpdates);
-    if (updateKeys.length > 1) {
-      filteredUpdates = {};
-      for (const pid of updateKeys) {
-        if (pid === socketId) {
-          filteredUpdates[pid] = delta.playerUpdates[pid];
-          enqueuePlayerIfUnknown(players.get(pid));
-          continue;
-        }
-        const other = players.get(pid);
-        if (!other) continue;
-        if (isWithinAoi(origin, other.segments[0])) {
-          filteredUpdates[pid] = delta.playerUpdates[pid];
-          enqueuePlayerIfUnknown(other);
-        }
+    for (const pid of updateKeys) {
+      if (pid === socketId) {
+        visiblePlayerIds.add(pid);
+        filteredUpdates[pid] = delta.playerUpdates[pid];
+        enqueuePlayerIfUnknown(players.get(pid));
+        continue;
       }
-    } else if (updateKeys.length === 1) {
-      enqueuePlayerIfUnknown(players.get(updateKeys[0]));
+
+      const other = players.get(pid);
+      if (!other || !isWithinAoi(origin, other.segments[0])) {
+        continue;
+      }
+
+      visiblePlayerIds.add(pid);
+      const wasNewForSocket = enqueuePlayerIfUnknown(other);
+      if (!wasNewForSocket) {
+        filteredUpdates[pid] = delta.playerUpdates[pid];
+      }
     }
 
     for (const candidate of delta.newPlayers) {
       if (candidate.id === socketId || isWithinAoi(origin, candidate.segments[0])) {
+        visiblePlayerIds.add(candidate.id);
         enqueuePlayerIfUnknown(candidate);
       }
     }
@@ -1020,6 +1024,16 @@ const emitDelta = (delta: DeltaUpdate) => {
       knownPlayerIds.delete(playerId);
       return true;
     });
+
+    // If a player leaves the client's AOI, explicitly remove it so it can be
+    // re-sent later as "new" when the player comes back into range.
+    for (const knownPlayerId of Array.from(knownPlayerIds)) {
+      if (visiblePlayerIds.has(knownPlayerId)) {
+        continue;
+      }
+      knownPlayerIds.delete(knownPlayerId);
+      outgoingRemovedPlayerIds.push(knownPlayerId);
+    }
 
     const outgoingRemovedFoodIds = delta.removedFoodIds.filter((foodId) => {
       if (!knownFoodIds.has(foodId)) {
