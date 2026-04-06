@@ -1006,8 +1006,10 @@ const emitDelta = (delta: DeltaUpdate) => {
     }
 
     const nearbyFoods = foodGrid.query(hx, hy, AOI_RADIUS);
+    const visibleFoodIds = new Set<string>();
     for (const entry of nearbyFoods) {
       if (!foods.has(entry.id)) continue; // skip stale food grid entries
+      visibleFoodIds.add(entry.id);
       enqueueFoodIfUnknown(entry.food);
     }
 
@@ -1026,6 +1028,16 @@ const emitDelta = (delta: DeltaUpdate) => {
       knownFoodIds.delete(foodId);
       return true;
     });
+
+    // If a food leaves the client's AOI, explicitly remove it so it can be
+    // re-sent as "new" when the player comes back later.
+    for (const foodId of Array.from(knownFoodIds)) {
+      if (visibleFoodIds.has(foodId)) {
+        continue;
+      }
+      knownFoodIds.delete(foodId);
+      outgoingRemovedFoodIds.push(foodId);
+    }
 
     socket.emit('delta', {
       playerUpdates: filteredUpdates,
