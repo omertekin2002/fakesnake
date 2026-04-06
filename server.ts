@@ -754,8 +754,46 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
       y: head.y + player.velocity.y * speed * dt,
     };
 
-    newHead.x = Math.max(0, Math.min(WORLD_SIZE, newHead.x));
-    newHead.y = Math.max(0, Math.min(WORLD_SIZE, newHead.y));
+    if (
+      newHead.x <= 0 ||
+      newHead.x >= WORLD_SIZE ||
+      newHead.y <= 0 ||
+      newHead.y >= WORLD_SIZE
+    ) {
+      const deathHead = {
+        x: Math.max(0, Math.min(WORLD_SIZE, newHead.x)),
+        y: Math.max(0, Math.min(WORLD_SIZE, newHead.y)),
+      };
+
+      player.segments.unshift(deathHead);
+      player.isDead = true;
+      delta.removedPlayerIds.push(playerId);
+      deadPlayerIds.push(playerId);
+      spawnProtectionUntilByPlayerId.delete(playerId);
+
+      if (!isBot(playerId)) {
+        io.to(playerId).emit('killed', { killerName: 'the wall' });
+      }
+
+      let deathFoodSpawned = 0;
+      for (let si = 0; si < player.segments.length && deathFoodSpawned < MAX_DEATH_FOOD; si += 2) {
+        const seg = player.segments[si];
+        const id = generateFoodId();
+        const newFood: Food = {
+          id,
+          position: { ...seg },
+          value: 3,
+          hue: player.hue,
+        };
+        foods.set(id, newFood);
+        foodCount++;
+        foodGrid.insert(newFood.position.x, newFood.position.y, { id, food: newFood });
+        delta.newFoods.push(newFood);
+        deathFoodSpawned++;
+      }
+
+      continue;
+    }
 
     player.segments.unshift(newHead);
 
