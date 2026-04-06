@@ -49,6 +49,9 @@ const DEFAULT_VIEWPORT = { width: 1280, height: 720 };
 const FIXED_DT = 1 / TICK_RATE;
 const MAX_ACCUMULATED_TIME = 0.25;
 const SPAWN_PROTECTION_MS = 2500;
+const MAX_DEATH_FOOD = 100;
+const INPUT_RATE_LIMIT_MS = 16; // ~60/sec max (client sends at 30Hz)
+const VIEWPORT_RATE_LIMIT_MS = 200; // 5/sec max
 const BOT_NAMES = [
   'Slinky', 'Noodle', 'Zigzag', 'Slithers', 'Hissy',
   'Coil', 'Viper', 'Fang', 'Scales', 'Twisty',
@@ -590,26 +593,62 @@ io.on('connection', (socket) => {
 
   pendingNewPlayers.push(newPlayer);
 
+  let lastInputTime = 0;
+  let lastViewportTime = 0;
+
   socket.on('input', (data: { x: number; y: number; boost?: boolean }) => {
+    const now = Date.now();
+    if (now - lastInputTime < INPUT_RATE_LIMIT_MS) return;
+    lastInputTime = now;
+
     const player = players.get(socket.id);
     if (player && !player.isDead) {
-      const length = Math.sqrt(data.x ** 2 + data.y ** 2);
-      if (length > 0) {
-        player.targetDirection = {
-          x: data.x / length,
-          y: data.y / length,
-        };
+      if (Number.isFinite(data.x) && Number.isFinite(data.y)) {
+        const length = Math.sqrt(data.x ** 2 + data.y ** 2);
+        if (length > 0) {
+          player.targetDirection = {
+            x: data.x / length,
+            y: data.y / length,
+          };
+        }
       }
       player.isBoosting = !!data.boost;
     }
   });
 
   socket.on('viewport', (data: { width?: number; height?: number }) => {
+    const now = Date.now();
+    if (now - lastViewportTime < VIEWPORT_RATE_LIMIT_MS) return;
+    lastViewportTime = now;
+
     playerViewports.set(socket.id, normalizeViewport(data));
   });
 
   socket.on('disconnect', () => {
     console.log(`Player disconnected: ${socket.id}`);
+    const disconnectedPlayer = players.get(socket.id);
+
+    // Spawn food from the disconnected player's body (same as death),
+    // so players can't disconnect to deny food to nearby attackers.
+    if (disconnectedPlayer && !disconnectedPlayer.isDead) {
+      let deathFoodSpawned = 0;
+      for (let si = 0; si < disconnectedPlayer.segments.length && deathFoodSpawned < MAX_DEATH_FOOD; si += 2) {
+        const seg = disconnectedPlayer.segments[si];
+        const id = generateFoodId();
+        const newFood: Food = {
+          id,
+          position: { ...seg },
+          value: 3,
+          hue: disconnectedPlayer.hue,
+        };
+        foods.set(id, newFood);
+        foodCount++;
+        foodGrid.insert(newFood.position.x, newFood.position.y, { id, food: newFood });
+        pendingNewFoods.push(newFood);
+        deathFoodSpawned++;
+      }
+    }
+
     players.delete(socket.id);
     playerViewports.delete(socket.id);
     knownPlayerIdsBySocket.delete(socket.id);
@@ -621,6 +660,7 @@ io.on('connection', (socket) => {
 
 let pendingNewPlayers: Player[] = [];
 let pendingRemovedPlayerIds: string[] = [];
+let pendingNewFoods: Food[] = [];
 
 let lastTime = Date.now();
 let accumulatedTime = 0;
@@ -719,6 +759,17 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
 
     player.segments.unshift(newHead);
 
+    // Insert the new head into the segment grid so that players processed
+    // later in this tick collide against our updated position, not the stale
+    // pre-move snapshot.
+    if (!isProtected) {
+      segmentGrid.insert(newHead.x, newHead.y, {
+        playerId,
+        segmentIndex: 0,
+        segment: newHead,
+      });
+    }
+
     // Check food collision via spatial grid
     const nearbyFoods = foodGrid.query(newHead.x, newHead.y, 20);
     for (const entry of nearbyFoods) {
@@ -795,22 +846,23 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
             io.to(playerId).emit('killed', { killerName });
           }
           
-          // Spawn food where player died
-          player.segments.forEach((seg, index) => {
-            if (index % 2 === 0) {
-              const id = generateFoodId();
-              const newFood: Food = {
-                id,
-                position: { ...seg },
-                value: 3,
-                hue: player.hue,
-              };
-              foods.set(id, newFood);
-              foodCount++;
-              foodGrid.insert(newFood.position.x, newFood.position.y, { id, food: newFood });
-              delta.newFoods.push(newFood);
-            }
-          });
+          // Spawn food where player died (capped to prevent food count explosions)
+          let deathFoodSpawned = 0;
+          for (let si = 0; si < player.segments.length && deathFoodSpawned < MAX_DEATH_FOOD; si += 2) {
+            const seg = player.segments[si];
+            const id = generateFoodId();
+            const newFood: Food = {
+              id,
+              position: { ...seg },
+              value: 3,
+              hue: player.hue,
+            };
+            foods.set(id, newFood);
+            foodCount++;
+            foodGrid.insert(newFood.position.x, newFood.position.y, { id, food: newFood });
+            delta.newFoods.push(newFood);
+            deathFoodSpawned++;
+          }
           break;
         }
       }
@@ -917,6 +969,7 @@ const emitDelta = (delta: DeltaUpdate) => {
 
     const nearbyFoods = foodGrid.query(hx, hy, AOI_RADIUS);
     for (const entry of nearbyFoods) {
+      if (!foods.has(entry.id)) continue; // skip stale food grid entries
       enqueueFoodIfUnknown(entry.food);
     }
 
@@ -936,24 +989,14 @@ const emitDelta = (delta: DeltaUpdate) => {
       return true;
     });
 
-    const shouldSendOriginalDelta =
-      filteredUpdates === delta.playerUpdates &&
-      outgoingNewPlayers.length === delta.newPlayers.length &&
-      outgoingNewFoods.length === delta.newFoods.length &&
-      outgoingRemovedPlayerIds.length === delta.removedPlayerIds.length &&
-      outgoingRemovedFoodIds.length === delta.removedFoodIds.length;
-
-    if (shouldSendOriginalDelta) {
-      socket.emit('delta', delta);
-    } else {
-      socket.emit('delta', {
-        playerUpdates: filteredUpdates,
-        newPlayers: outgoingNewPlayers,
-        removedPlayerIds: outgoingRemovedPlayerIds,
-        newFoods: outgoingNewFoods,
-        removedFoodIds: outgoingRemovedFoodIds,
-      });
-    }
+    socket.emit('delta', {
+      playerUpdates: filteredUpdates,
+      newPlayers: outgoingNewPlayers,
+      removedPlayerIds: outgoingRemovedPlayerIds,
+      newFoods: outgoingNewFoods,
+      removedFoodIds: outgoingRemovedFoodIds,
+      summary: delta.summary,
+    });
   }
 };
 
@@ -971,17 +1014,21 @@ const updateGame = () => {
     playerUpdates: {},
     newPlayers: [...pendingNewPlayers],
     removedPlayerIds: [...pendingRemovedPlayerIds],
-    newFoods: [],
+    newFoods: [...pendingNewFoods],
     removedFoodIds: [],
-    summary: createWorldSummary(),
+    summary: { players: [], foodCount: 0, worldSize: WORLD_SIZE },
   };
 
   pendingNewPlayers = [];
   pendingRemovedPlayerIds = [];
+  pendingNewFoods = [];
 
-  while (accumulatedTime >= FIXED_DT) {
-    stepGame(FIXED_DT, delta);
-    accumulatedTime -= FIXED_DT;
+  stepGame(FIXED_DT, delta);
+  accumulatedTime -= FIXED_DT;
+  // Cap so we never run more than one tick per delta — multiple ticks would
+  // overwrite playerUpdates and desync client-side snake lengths.
+  if (accumulatedTime > FIXED_DT) {
+    accumulatedTime = 0;
   }
 
   delta.summary = createWorldSummary();

@@ -404,7 +404,8 @@ export default function App() {
       const now = performance.now();
 
       // Score particles for food we ate
-      if (me && delta.removedFoodIds.length > 0) {
+      const myUpdate = myId ? delta.playerUpdates[myId] : undefined;
+      if (me && myUpdate && myUpdate.score > me.score && delta.removedFoodIds.length > 0) {
         const head = me.segments[0];
         for (const foodId of delta.removedFoodIds) {
           const food = localState.foods[foodId];
@@ -573,6 +574,9 @@ export default function App() {
     let animationFrameId = 0;
     let leaderboardCache: { top5: WorldSummary['players']; myRank: number } | null = null;
     let leaderboardCacheTime = 0;
+    let lastFoodPruneTime = 0;
+    const FOOD_PRUNE_INTERVAL = 2000; // prune every 2 seconds
+    const FOOD_PRUNE_MARGIN = 1400; // slightly larger than server AOI_RADIUS (1200)
 
     const renderMenuScene = (time: number) => {
       ctx.fillStyle = '#1a1a1a';
@@ -651,6 +655,22 @@ export default function App() {
       ctx.strokeStyle = 'red';
       ctx.lineWidth = 5;
       ctx.strokeRect(0, 0, WORLD_SIZE, WORLD_SIZE);
+
+      // ── Prune stale food that drifted far outside AOI ─────────────
+      if (time - lastFoodPruneTime > FOOD_PRUNE_INTERVAL) {
+        lastFoodPruneTime = time;
+        const centerX = myHead.x;
+        const centerY = myHead.y;
+        const pruneSq = FOOD_PRUNE_MARGIN * FOOD_PRUNE_MARGIN;
+        for (const foodId in gameState.foods) {
+          const pos = gameState.foods[foodId].position;
+          const dx = pos.x - centerX;
+          const dy = pos.y - centerY;
+          if (dx * dx + dy * dy > pruneSq) {
+            delete gameState.foods[foodId];
+          }
+        }
+      }
 
       for (const foodId in gameState.foods) {
         const food = gameState.foods[foodId];
@@ -771,7 +791,8 @@ export default function App() {
         const p = particles[i];
         const age = now - p.createdAt;
         if (age > PARTICLE_DURATION) {
-          particles.splice(i, 1);
+          particles[i] = particles[particles.length - 1];
+          particles.pop();
           continue;
         }
         const t = age / PARTICLE_DURATION;
@@ -792,7 +813,8 @@ export default function App() {
         const dp = deathParts[i];
         const age = now - dp.createdAt;
         if (age > DEATH_DURATION) {
-          deathParts.splice(i, 1);
+          deathParts[i] = deathParts[deathParts.length - 1];
+          deathParts.pop();
           continue;
         }
         const t = age / DEATH_DURATION;
