@@ -550,13 +550,6 @@ const serializeStateForPlayer = (playerId: string): GameState => {
   };
 };
 
-// Convert Maps to Records for serialization (used only on init)
-const serializeState = (): GameState => ({
-  players: Object.fromEntries(players),
-  foods: Object.fromEntries(foods),
-  worldSize: WORLD_SIZE,
-});
-
 // Initial food
 spawnFood(FOOD_COUNT);
 
@@ -719,8 +712,9 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
     }
   }
 
-  // Update players
+  // ── Phase 1: Move all players, eat food, handle growth ─────────────
   const deadPlayerIds: string[] = [];
+  const movedPlayers: Array<{ playerId: string; player: Player; newHead: Vector2; isProtected: boolean }> = [];
 
   for (const [playerId, player] of players) {
     if (player.isDead) continue;
@@ -729,11 +723,11 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
     // Smoothly rotate velocity towards targetDirection
     const currentAngle = Math.atan2(player.velocity.y, player.velocity.x);
     const targetAngle = Math.atan2(player.targetDirection.y, player.targetDirection.x);
-    
+
     let angleDiff = targetAngle - currentAngle;
     while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
     while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
-    
+
     const maxTurn = TURN_SPEED * dt;
     if (Math.abs(angleDiff) <= maxTurn) {
       player.velocity = { ...player.targetDirection };
@@ -754,6 +748,7 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
       y: head.y + player.velocity.y * speed * dt,
     };
 
+    // Wall deaths are unambiguous — resolve immediately
     if (
       newHead.x <= 0 ||
       newHead.x >= WORLD_SIZE ||
@@ -797,17 +792,6 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
 
     player.segments.unshift(newHead);
 
-    // Insert the new head into the segment grid so that players processed
-    // later in this tick collide against our updated position, not the stale
-    // pre-move snapshot.
-    if (!isProtected) {
-      segmentGrid.insert(newHead.x, newHead.y, {
-        playerId,
-        segmentIndex: 0,
-        segment: newHead,
-      });
-    }
-
     // Check food collision via spatial grid
     const nearbyFoods = foodGrid.query(newHead.x, newHead.y, 20);
     for (const entry of nearbyFoods) {
@@ -815,7 +799,7 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
       const dx = newHead.x - entry.food.position.x;
       const dy = newHead.y - entry.food.position.y;
       const distSq = dx * dx + dy * dy;
-      
+
       if (distSq < 400) {
         player.score += entry.food.value;
         foods.delete(entry.id);
@@ -857,57 +841,81 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
       removeTail: tailsRemoved,
       score: player.score,
       velocity: { ...player.velocity },
+      isBoosting: player.isBoosting,
     };
 
-    // Check collision with other players and own body via spatial grid
+    movedPlayers.push({ playerId, player, newHead, isProtected });
+  }
+
+  // ── Phase 2: Insert all new heads into segment grid ───────────────
+  // Done as a batch so every collision check sees the same snapshot of
+  // all post-move head positions — no iteration-order advantage.
+  for (const { playerId, newHead, isProtected } of movedPlayers) {
     if (!isProtected) {
-      const nearbySegments = segmentGrid.query(newHead.x, newHead.y, 15);
-      for (const entry of nearbySegments) {
-        if (entry.playerId === playerId) continue;
-        const other = players.get(entry.playerId);
-        if (!other || other.isDead) continue;
+      segmentGrid.insert(newHead.x, newHead.y, {
+        playerId,
+        segmentIndex: 0,
+        segment: newHead,
+      });
+    }
+  }
 
-        const dx = newHead.x - entry.segment.x;
-        const dy = newHead.y - entry.segment.y;
-        const distSq = dx * dx + dy * dy;
+  // ── Phase 3: Check collisions simultaneously ──────────────────────
+  // Collect deaths first, apply after — so two snakes that collide with
+  // each other in the same tick both die instead of one surviving due
+  // to iteration order.
+  const collisionDeaths: Array<{ playerId: string; player: Player; killerName: string }> = [];
 
-        if (distSq < 225) {
-          player.isDead = true;
-          delta.removedPlayerIds.push(playerId);
-          deadPlayerIds.push(playerId);
-          delete delta.playerUpdates[playerId];
-          spawnProtectionUntilByPlayerId.delete(playerId);
+  for (const { playerId, player, newHead, isProtected } of movedPlayers) {
+    if (isProtected) continue;
 
-          // Tell the player who killed them
-          if (!isBot(playerId)) {
-            const killerName = other?.name || 'Unknown';
-            io.to(playerId).emit('killed', { killerName });
-          }
-          
-          // Spawn food where player died (capped to prevent food count explosions)
-          let deathFoodSpawned = 0;
-          for (let si = 0; si < player.segments.length && deathFoodSpawned < MAX_DEATH_FOOD; si += 2) {
-            const seg = player.segments[si];
-            const id = generateFoodId();
-            const newFood: Food = {
-              id,
-              position: { ...seg },
-              value: 3,
-              hue: player.hue,
-            };
-            foods.set(id, newFood);
-            foodCount++;
-            foodGrid.insert(newFood.position.x, newFood.position.y, { id, food: newFood });
-            delta.newFoods.push(newFood);
-            deathFoodSpawned++;
-          }
-          break;
-        }
+    const nearbySegments = segmentGrid.query(newHead.x, newHead.y, 15);
+    for (const entry of nearbySegments) {
+      if (entry.playerId === playerId) continue;
+      const other = players.get(entry.playerId);
+      if (!other || other.isDead) continue; // isDead is only true for wall deaths here
+
+      const dx = newHead.x - entry.segment.x;
+      const dy = newHead.y - entry.segment.y;
+      const distSq = dx * dx + dy * dy;
+
+      if (distSq < 225) {
+        collisionDeaths.push({ playerId, player, killerName: other.name || 'Unknown' });
+        break;
       }
     }
   }
 
-  // Remove dead players — delete from Map directly (no second pass needed)
+  for (const { playerId, player, killerName } of collisionDeaths) {
+    player.isDead = true;
+    delta.removedPlayerIds.push(playerId);
+    deadPlayerIds.push(playerId);
+    delete delta.playerUpdates[playerId];
+    spawnProtectionUntilByPlayerId.delete(playerId);
+
+    if (!isBot(playerId)) {
+      io.to(playerId).emit('killed', { killerName });
+    }
+
+    let deathFoodSpawned = 0;
+    for (let si = 0; si < player.segments.length && deathFoodSpawned < MAX_DEATH_FOOD; si += 2) {
+      const seg = player.segments[si];
+      const id = generateFoodId();
+      const newFood: Food = {
+        id,
+        position: { ...seg },
+        value: 3,
+        hue: player.hue,
+      };
+      foods.set(id, newFood);
+      foodCount++;
+      foodGrid.insert(newFood.position.x, newFood.position.y, { id, food: newFood });
+      delta.newFoods.push(newFood);
+      deathFoodSpawned++;
+    }
+  }
+
+  // Remove dead players
   for (const id of deadPlayerIds) {
     players.delete(id);
     spawnProtectionUntilByPlayerId.delete(id);
@@ -934,12 +942,15 @@ const emitDelta = (delta: DeltaUpdate) => {
     knownFoodIdsBySocket.set(socketId, knownFoodIds);
 
     if (!player) {
-      // Dead or transitional — send full delta so client detects death
-      for (const playerId of delta.newPlayers.map((entry) => entry.id)) knownPlayerIds.add(playerId);
-      for (const food of delta.newFoods) knownFoodIds.add(food.id);
-      for (const playerId of delta.removedPlayerIds) knownPlayerIds.delete(playerId);
-      for (const foodId of delta.removedFoodIds) knownFoodIds.delete(foodId);
-      socket.emit('delta', delta);
+      // Only send on the death tick so the client can detect its own removal.
+      // After that, skip — the client is on the death screen and needs no updates.
+      if (delta.removedPlayerIds.includes(socketId)) {
+        for (const playerId of delta.newPlayers.map((entry) => entry.id)) knownPlayerIds.add(playerId);
+        for (const food of delta.newFoods) knownFoodIds.add(food.id);
+        for (const playerId of delta.removedPlayerIds) knownPlayerIds.delete(playerId);
+        for (const foodId of delta.removedFoodIds) knownFoodIds.delete(foodId);
+        socket.emit('delta', delta);
+      }
       continue;
     }
 
