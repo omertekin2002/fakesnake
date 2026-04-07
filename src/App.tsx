@@ -12,7 +12,6 @@ import {
   SnakeAppearance,
 } from './shared/skins';
 
-const WORLD_SIZE = 3000;
 const GRID_SIZE = 50;
 const MENU_DRIFT_RANGE = 18;
 const INPUT_THROTTLE_MS = 1000 / 30; // match server tick rate
@@ -326,7 +325,7 @@ export default function App() {
   const worldSummaryRef = useRef<WorldSummary>({
     players: [],
     foodCount: 0,
-    worldSize: WORLD_SIZE,
+    worldSize: 3000,
   });
   const myIdRef = useRef<string | null>(null);
   const playerNameRef = useRef('');
@@ -683,7 +682,7 @@ export default function App() {
 
       ctx.strokeStyle = 'red';
       ctx.lineWidth = 5;
-      ctx.strokeRect(0, 0, WORLD_SIZE, WORLD_SIZE);
+      ctx.strokeRect(0, 0, gameState.worldSize, gameState.worldSize);
 
       // ── Prune stale food that drifted far outside AOI ─────────────
       if (time - lastFoodPruneTime > FOOD_PRUNE_INTERVAL) {
@@ -899,7 +898,7 @@ export default function App() {
       const mmPad = 14;
       const mmX = windowSize.width - mmSize - mmPad;
       const mmY = windowSize.height - mmSize - mmPad;
-      const mmScale = mmSize / WORLD_SIZE;
+      const mmScale = mmSize / gameState.worldSize;
 
       // Background
       ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
