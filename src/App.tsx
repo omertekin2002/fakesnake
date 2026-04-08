@@ -921,6 +921,9 @@ export default function App() {
   const startGame = () => {
     gameStateRef.current = null;
     myIdRef.current = null;
+    particlesRef.current = [];
+    deathParticlesRef.current = [];
+    interpRef.current.clear();
     setScore(0);
     setKilledBy(null);
     setPhase('connecting');
