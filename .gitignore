@@ -1,8 +1,4 @@
 node_modules/
-.playwright/
-.playwright-mcp/
-playwright-report/
-test-results/
 build/
 dist/
 coverage/

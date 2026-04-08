@@ -12,6 +12,7 @@ import {
   SnakeAppearance,
 } from './shared/skins';
 
+const WORLD_SIZE = 3000;
 const GRID_SIZE = 50;
 const MENU_DRIFT_RANGE = 18;
 const INPUT_THROTTLE_MS = 1000 / 30; // match server tick rate
@@ -142,51 +143,6 @@ const getSegmentColor = (
   return mixColors(base, palette.stripe, stripeStrength);
 };
 
-const segmentSpriteCache = new Map<string, HTMLCanvasElement>();
-
-const getSegmentSprite = (
-  radius: number,
-  fillColor: string,
-  highlightColor: string,
-): HTMLCanvasElement => {
-  const r = Math.round(radius * 2) / 2; // bucket to nearest 0.5px
-  const key = `${fillColor}|${highlightColor}|${r}`;
-  let sprite = segmentSpriteCache.get(key);
-  if (sprite) return sprite;
-
-  const strokeWidth = Math.max(1, r * 0.08);
-  const size = Math.ceil((r + strokeWidth) * 2);
-  sprite = document.createElement('canvas');
-  sprite.width = size;
-  sprite.height = size;
-  const sCtx = sprite.getContext('2d')!;
-  const cx = size / 2;
-  const cy = size / 2;
-
-  const gradient = sCtx.createRadialGradient(
-    cx - r * 0.38,
-    cy - r * 0.42,
-    r * 0.15,
-    cx,
-    cy,
-    r,
-  );
-  gradient.addColorStop(0, mixColors(fillColor, highlightColor, 0.72));
-  gradient.addColorStop(0.52, fillColor);
-  gradient.addColorStop(1, mixColors(fillColor, '#050505', 0.28));
-
-  sCtx.fillStyle = gradient;
-  sCtx.beginPath();
-  sCtx.arc(cx, cy, r, 0, Math.PI * 2);
-  sCtx.fill();
-  sCtx.strokeStyle = withAlpha(highlightColor, 0.22);
-  sCtx.lineWidth = strokeWidth;
-  sCtx.stroke();
-
-  segmentSpriteCache.set(key, sprite);
-  return sprite;
-};
-
 const drawSegmentCircle = (
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -195,8 +151,25 @@ const drawSegmentCircle = (
   fillColor: string,
   highlightColor: string,
 ) => {
-  const sprite = getSegmentSprite(radius, fillColor, highlightColor);
-  ctx.drawImage(sprite, x - sprite.width / 2, y - sprite.height / 2);
+  const gradient = ctx.createRadialGradient(
+    x - radius * 0.38,
+    y - radius * 0.42,
+    radius * 0.15,
+    x,
+    y,
+    radius,
+  );
+  gradient.addColorStop(0, mixColors(fillColor, highlightColor, 0.72));
+  gradient.addColorStop(0.52, fillColor);
+  gradient.addColorStop(1, mixColors(fillColor, '#050505', 0.28));
+
+  ctx.fillStyle = gradient;
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = withAlpha(highlightColor, 0.22);
+  ctx.lineWidth = Math.max(1, radius * 0.08);
+  ctx.stroke();
 };
 
 const createMenuFoods = (width: number, height: number): MenuFood[] => {
@@ -295,7 +268,6 @@ const applyDelta = (localState: GameState, delta: DeltaUpdate): void => {
     }
     player.score = update.score;
     player.velocity = update.velocity;
-    player.isBoosting = update.isBoosting;
   }
 
   for (const id of delta.removedPlayerIds) {
@@ -325,7 +297,7 @@ export default function App() {
   const worldSummaryRef = useRef<WorldSummary>({
     players: [],
     foodCount: 0,
-    worldSize: 3000,
+    worldSize: WORLD_SIZE,
   });
   const myIdRef = useRef<string | null>(null);
   const playerNameRef = useRef('');
@@ -682,7 +654,7 @@ export default function App() {
 
       ctx.strokeStyle = 'red';
       ctx.lineWidth = 5;
-      ctx.strokeRect(0, 0, gameState.worldSize, gameState.worldSize);
+      ctx.strokeRect(0, 0, WORLD_SIZE, WORLD_SIZE);
 
       // ── Prune stale food that drifted far outside AOI ─────────────
       if (time - lastFoodPruneTime > FOOD_PRUNE_INTERVAL) {
@@ -898,7 +870,7 @@ export default function App() {
       const mmPad = 14;
       const mmX = windowSize.width - mmSize - mmPad;
       const mmY = windowSize.height - mmSize - mmPad;
-      const mmScale = mmSize / gameState.worldSize;
+      const mmScale = mmSize / WORLD_SIZE;
 
       // Background
       ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
