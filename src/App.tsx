@@ -268,6 +268,7 @@ const applyDelta = (localState: GameState, delta: DeltaUpdate): void => {
     }
     player.score = update.score;
     player.velocity = update.velocity;
+    player.isBoosting = update.isBoosting;
   }
 
   for (const id of delta.removedPlayerIds) {

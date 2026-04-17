@@ -147,21 +147,21 @@ const scoreBotSpawnCandidate = (segments: Vector2[]): number => {
     if (player.isDead || isBot(playerId)) continue;
 
     const viewport = playerViewports.get(playerId) ?? DEFAULT_VIEWPORT;
-    if (isPointInsideViewport(botHead, player.segments[0], viewport)) {
+    if (isPointInsideViewport(botHead, player.segments.get(0), viewport)) {
       viewportPenalty += 100;
     }
 
-    minDistSq = Math.min(minDistSq, distanceSq(botHead, player.segments[0]));
+    minDistSq = Math.min(minDistSq, distanceSq(botHead, player.segments.get(0)));
 
     for (let i = 0; i < player.segments.length; i += 5) {
-      minDistSq = Math.min(minDistSq, distanceSq(botHead, player.segments[i]));
+      minDistSq = Math.min(minDistSq, distanceSq(botHead, player.segments.get(i)));
     }
 
     for (let i = 0; i < segments.length; i += 5) {
-      if (isPointInsideViewport(segments[i], player.segments[0], viewport)) {
+      if (isPointInsideViewport(segments[i], player.segments.get(0), viewport)) {
         viewportPenalty += 10;
       }
-      minDistSq = Math.min(minDistSq, distanceSq(segments[i], player.segments[0]));
+      minDistSq = Math.min(minDistSq, distanceSq(segments[i], player.segments.get(0)));
     }
   }
 
@@ -178,25 +178,25 @@ const isBotSpawnSafe = (segments: Vector2[]): boolean => {
 
     const viewport = playerViewports.get(playerId) ?? DEFAULT_VIEWPORT;
 
-    if (distanceSq(botHead, player.segments[0]) < headRadiusSq) {
+    if (distanceSq(botHead, player.segments.get(0)) < headRadiusSq) {
       return false;
     }
 
-    if (isPointInsideViewport(botHead, player.segments[0], viewport)) {
+    if (isPointInsideViewport(botHead, player.segments.get(0), viewport)) {
       return false;
     }
 
     for (let i = 0; i < player.segments.length; i += 5) {
-      if (distanceSq(botHead, player.segments[i]) < segmentRadiusSq) {
+      if (distanceSq(botHead, player.segments.get(i)) < segmentRadiusSq) {
         return false;
       }
     }
 
     for (let i = 0; i < segments.length; i += 5) {
-      if (isPointInsideViewport(segments[i], player.segments[0], viewport)) {
+      if (isPointInsideViewport(segments[i], player.segments.get(0), viewport)) {
         return false;
       }
-      if (distanceSq(segments[i], player.segments[0]) < segmentRadiusSq) {
+      if (distanceSq(segments[i], player.segments.get(0)) < segmentRadiusSq) {
         return false;
       }
     }
@@ -239,19 +239,19 @@ const scoreHumanSpawnCandidate = (segments: Vector2[]): number => {
   for (const [playerId, player] of players) {
     if (player.isDead) continue;
 
-    minDistSq = Math.min(minDistSq, distanceSq(head, player.segments[0]));
+    minDistSq = Math.min(minDistSq, distanceSq(head, player.segments.get(0)));
 
     for (let i = 0; i < player.segments.length; i += 5) {
-      minDistSq = Math.min(minDistSq, distanceSq(head, player.segments[i]));
+      minDistSq = Math.min(minDistSq, distanceSq(head, player.segments.get(i)));
     }
 
     if (!isBot(playerId)) {
       const viewport = playerViewports.get(playerId) ?? DEFAULT_VIEWPORT;
-      if (isPointInsideViewport(head, player.segments[0], viewport)) {
+      if (isPointInsideViewport(head, player.segments.get(0), viewport)) {
         viewportPenalty += 100;
       }
       for (let i = 0; i < segments.length; i += 5) {
-        if (isPointInsideViewport(segments[i], player.segments[0], viewport)) {
+        if (isPointInsideViewport(segments[i], player.segments.get(0), viewport)) {
           viewportPenalty += 10;
         }
       }
@@ -269,29 +269,29 @@ const isHumanSpawnSafe = (segments: Vector2[]): boolean => {
   for (const [playerId, player] of players) {
     if (player.isDead) continue;
 
-    if (distanceSq(head, player.segments[0]) < headRadiusSq) {
+    if (distanceSq(head, player.segments.get(0)) < headRadiusSq) {
       return false;
     }
 
     for (let i = 0; i < player.segments.length; i += 5) {
-      if (distanceSq(head, player.segments[i]) < segmentRadiusSq) {
+      if (distanceSq(head, player.segments.get(i)) < segmentRadiusSq) {
         return false;
       }
     }
 
     for (let i = 0; i < segments.length; i += 5) {
-      if (distanceSq(segments[i], player.segments[0]) < segmentRadiusSq) {
+      if (distanceSq(segments[i], player.segments.get(0)) < segmentRadiusSq) {
         return false;
       }
     }
 
     if (!isBot(playerId)) {
       const viewport = playerViewports.get(playerId) ?? DEFAULT_VIEWPORT;
-      if (isPointInsideViewport(head, player.segments[0], viewport)) {
+      if (isPointInsideViewport(head, player.segments.get(0), viewport)) {
         return false;
       }
       for (let i = 0; i < segments.length; i += 5) {
-        if (isPointInsideViewport(segments[i], player.segments[0], viewport)) {
+        if (isPointInsideViewport(segments[i], player.segments.get(0), viewport)) {
           return false;
         }
       }
@@ -325,7 +325,7 @@ const pickHumanSpawn = (): SpawnCandidate => {
   return createSpawnCandidate(HUMAN_SPAWN_MARGIN);
 };
 
-const spawnBot = (): Player => {
+const spawnBot = (): ServerPlayer => {
   const id = `${BOT_PREFIX}${botIdCounter++}`;
   const { startDir, segments } = pickBotSpawn();
   const appearance = createRandomSnakeAppearance();
@@ -335,7 +335,7 @@ const spawnBot = (): Player => {
     name: BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)],
     hue: getSnakePalette(appearance.paletteId).foodHue,
     appearance,
-    segments,
+    segments: SegmentBuffer.from(segments),
     velocity: startDir,
     targetDirection: startDir,
     score: 0,
@@ -344,8 +344,8 @@ const spawnBot = (): Player => {
   };
 };
 
-const updateBotAI = (player: Player): void => {
-  const head = player.segments[0];
+const updateBotAI = (player: ServerPlayer): void => {
+  const head = player.segments.get(0);
 
   // Avoid walls — steer toward center when near edges
   let steerX = 0, steerY = 0;
@@ -441,6 +441,79 @@ class SpatialGrid<T> {
   }
 }
 
+class SegmentBuffer {
+  private buf: (Vector2 | undefined)[];
+  private start: number;
+  private _length: number;
+  private capacity: number;
+
+  constructor(capacity = 128) {
+    this.capacity = capacity;
+    this.buf = new Array(capacity);
+    this.start = 0;
+    this._length = 0;
+  }
+
+  get length(): number {
+    return this._length;
+  }
+
+  private grow(): void {
+    const newCap = this.capacity * 2;
+    const newBuf: (Vector2 | undefined)[] = new Array(newCap);
+    for (let i = 0; i < this._length; i++) {
+      newBuf[i] = this.buf[(this.start + i) % this.capacity];
+    }
+    this.buf = newBuf;
+    this.start = 0;
+    this.capacity = newCap;
+  }
+
+  get(i: number): Vector2 {
+    return this.buf[(this.start + i) % this.capacity]!;
+  }
+
+  pushFront(item: Vector2): void {
+    if (this._length === this.capacity) this.grow();
+    this.start = (this.start - 1 + this.capacity) % this.capacity;
+    this.buf[this.start] = item;
+    this._length++;
+  }
+
+  popBack(): Vector2 {
+    this._length--;
+    const idx = (this.start + this._length) % this.capacity;
+    const item = this.buf[idx]!;
+    this.buf[idx] = undefined;
+    return item;
+  }
+
+  toArray(): Vector2[] {
+    const result: Vector2[] = new Array(this._length);
+    for (let i = 0; i < this._length; i++) {
+      result[i] = this.buf[(this.start + i) % this.capacity]!;
+    }
+    return result;
+  }
+
+  static from(arr: Vector2[]): SegmentBuffer {
+    const cap = Math.max(128, arr.length * 2);
+    const sb = new SegmentBuffer(cap);
+    for (let i = 0; i < arr.length; i++) {
+      sb.buf[i] = arr[i];
+    }
+    sb._length = arr.length;
+    return sb;
+  }
+}
+
+type ServerPlayer = Omit<Player, 'segments'> & { segments: SegmentBuffer };
+
+const toWirePlayer = (p: ServerPlayer): Player => ({
+  ...p,
+  segments: p.segments.toArray(),
+});
+
 type FoodEntry = { id: string; food: Food };
 type SegmentEntry = { playerId: string; segmentIndex: number; segment: Vector2 };
 
@@ -456,7 +529,7 @@ const io = new Server(httpServer, {
 });
 
 // ── Server-side state using Maps for faster iteration/deletion ──────
-const players = new Map<string, Player>();
+const players = new Map<string, ServerPlayer>();
 const foods = new Map<string, Food>();
 const playerViewports = new Map<string, ViewportSize>();
 const knownPlayerIdsBySocket = new Map<string, Set<string>>();
@@ -517,7 +590,7 @@ const createWorldSummary = (): WorldSummary => ({
     id: player.id,
     name: player.name,
     appearance: player.appearance,
-    position: { ...player.segments[0] },
+    position: { ...player.segments.get(0) },
     score: player.score,
   })),
   foodCount,
@@ -534,9 +607,9 @@ const serializeStateForPlayer = (playerId: string): GameState => {
     };
   }
 
-  const head = player.segments[0];
+  const head = player.segments.get(0);
   const visiblePlayers = Array.from(players.values()).filter((candidate) =>
-    candidate.id === playerId || isWithinAoi(head, candidate.segments[0]),
+    candidate.id === playerId || isWithinAoi(head, candidate.segments.get(0)),
   );
   const visibleFoods = foodGrid
     .query(head.x, head.y, AOI_RADIUS)
@@ -544,7 +617,7 @@ const serializeStateForPlayer = (playerId: string): GameState => {
     .map((entry) => entry.food);
 
   return {
-    players: Object.fromEntries(visiblePlayers.map((candidate) => [candidate.id, candidate])),
+    players: Object.fromEntries(visiblePlayers.map((candidate) => [candidate.id, toWirePlayer(candidate)])),
     foods: Object.fromEntries(visibleFoods.map((food) => [food.id, food])),
     worldSize: WORLD_SIZE,
   };
@@ -552,7 +625,7 @@ const serializeStateForPlayer = (playerId: string): GameState => {
 
 // Convert Maps to Records for serialization (used only on init)
 const serializeState = (): GameState => ({
-  players: Object.fromEntries(players),
+  players: Object.fromEntries(Array.from(players, ([id, p]) => [id, toWirePlayer(p)])),
   foods: Object.fromEntries(foods),
   worldSize: WORLD_SIZE,
 });
@@ -570,12 +643,12 @@ io.on('connection', (socket) => {
   const playerName = rawName || `Player ${Math.floor(Math.random() * 1000)}`;
   const appearance = normalizeSnakeAppearance(socket.handshake.auth?.appearance);
 
-  const newPlayer: Player = {
+  const newPlayer: ServerPlayer = {
     id: socket.id,
     name: playerName,
     hue: getSnakePalette(appearance.paletteId).foodHue,
     appearance,
-    segments,
+    segments: SegmentBuffer.from(segments),
     velocity: startDir,
     targetDirection: startDir,
     score: 0,
@@ -633,7 +706,7 @@ io.on('connection', (socket) => {
     if (disconnectedPlayer && !disconnectedPlayer.isDead) {
       let deathFoodSpawned = 0;
       for (let si = 0; si < disconnectedPlayer.segments.length && deathFoodSpawned < MAX_DEATH_FOOD; si += 2) {
-        const seg = disconnectedPlayer.segments[si];
+        const seg = disconnectedPlayer.segments.get(si);
         const id = generateFoodId();
         const newFood: Food = {
           id,
@@ -658,7 +731,7 @@ io.on('connection', (socket) => {
   });
 });
 
-let pendingNewPlayers: Player[] = [];
+let pendingNewPlayers: ServerPlayer[] = [];
 let pendingRemovedPlayerIds: string[] = [];
 let pendingNewFoods: Food[] = [];
 
@@ -678,7 +751,7 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
   while (aliveCount < TARGET_PLAYER_COUNT) {
     const bot = spawnBot();
     players.set(bot.id, bot);
-    delta.newPlayers.push(bot);
+    delta.newPlayers.push(toWirePlayer(bot));
     aliveCount++;
   }
 
@@ -706,21 +779,16 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
     updateBotAI(player);
   }
 
-  // ── Rebuild segment grid ──────────────────────────────────────────
-  segmentGrid.clear();
-  for (const [pid, p] of players) {
-    if (p.isDead || isPlayerSpawnProtected(pid, tickNow)) continue;
-    for (let i = 0; i < p.segments.length; i++) {
-      segmentGrid.insert(p.segments[i].x, p.segments[i].y, {
-        playerId: pid,
-        segmentIndex: i,
-        segment: p.segments[i],
-      });
-    }
-  }
+  // Pending deaths are collected across both passes (wall hits in Pass 1,
+  // snake-vs-snake in Pass 2) and processed together at the end.
+  type PendingDeath = { playerId: string; killerName: string };
+  const pendingDeaths: PendingDeath[] = [];
 
-  // Update players
-  const deadPlayerIds: string[] = [];
+  // ── Pass 1: Move all players ───────────────────────────────────────
+  // Movement and food collection happen first, without any collision
+  // checks.  This guarantees every player's position is final before
+  // we test for collisions, so iteration order cannot advantage one
+  // player over another in a head-on encounter.
 
   for (const [playerId, player] of players) {
     if (player.isDead) continue;
@@ -729,11 +797,11 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
     // Smoothly rotate velocity towards targetDirection
     const currentAngle = Math.atan2(player.velocity.y, player.velocity.x);
     const targetAngle = Math.atan2(player.targetDirection.y, player.targetDirection.x);
-    
+
     let angleDiff = targetAngle - currentAngle;
     while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
     while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
-    
+
     const maxTurn = TURN_SPEED * dt;
     if (Math.abs(angleDiff) <= maxTurn) {
       player.velocity = { ...player.targetDirection };
@@ -745,7 +813,7 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
       };
     }
 
-    const head = player.segments[0];
+    const head = player.segments.get(0);
     const canBoost = !isProtected && player.isBoosting && player.segments.length > BOOST_MIN_LENGTH;
     const speed = canBoost ? SNAKE_SPEED * BOOST_SPEED_MULTIPLIER : SNAKE_SPEED;
 
@@ -754,21 +822,13 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
       y: head.y + player.velocity.y * speed * dt,
     };
 
-    newHead.x = Math.max(0, Math.min(WORLD_SIZE, newHead.x));
-    newHead.y = Math.max(0, Math.min(WORLD_SIZE, newHead.y));
-
-    player.segments.unshift(newHead);
-
-    // Insert the new head into the segment grid so that players processed
-    // later in this tick collide against our updated position, not the stale
-    // pre-move snapshot.
-    if (!isProtected) {
-      segmentGrid.insert(newHead.x, newHead.y, {
-        playerId,
-        segmentIndex: 0,
-        segment: newHead,
-      });
+    // Wall death — hitting the boundary kills the snake
+    if (newHead.x <= 0 || newHead.x >= WORLD_SIZE || newHead.y <= 0 || newHead.y >= WORLD_SIZE) {
+      pendingDeaths.push({ playerId, killerName: 'the wall' });
+      continue;
     }
+
+    player.segments.pushFront(newHead);
 
     // Check food collision via spatial grid
     const nearbyFoods = foodGrid.query(newHead.x, newHead.y, 20);
@@ -777,7 +837,7 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
       const dx = newHead.x - entry.food.position.x;
       const dy = newHead.y - entry.food.position.y;
       const distSq = dx * dx + dy * dy;
-      
+
       if (distSq < 400) {
         player.score += entry.food.value;
         foods.delete(entry.id);
@@ -791,13 +851,13 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
 
     let tailsRemoved = 0;
     if (player.segments.length > targetLength) {
-      player.segments.pop();
+      player.segments.popBack();
       tailsRemoved++;
     }
 
     // Boost: shed a tail segment as food each tick
     if (canBoost) {
-      const shed = player.segments.pop()!;
+      const shed = player.segments.popBack()!;
       tailsRemoved++;
       player.score = Math.max(0, player.score - 1);
 
@@ -819,57 +879,86 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
       removeTail: tailsRemoved,
       score: player.score,
       velocity: { ...player.velocity },
+      isBoosting: canBoost,
     };
+  }
 
-    // Check collision with other players and own body via spatial grid
-    if (!isProtected) {
-      const nearbySegments = segmentGrid.query(newHead.x, newHead.y, 15);
-      for (const entry of nearbySegments) {
-        if (entry.playerId === playerId) continue;
-        const other = players.get(entry.playerId);
-        if (!other || other.isDead) continue;
+  // ── Rebuild segment grid with final post-movement positions ───────
+  segmentGrid.clear();
+  for (const [pid, p] of players) {
+    if (p.isDead || isPlayerSpawnProtected(pid, tickNow)) continue;
+    for (let i = 0; i < p.segments.length; i++) {
+      segmentGrid.insert(p.segments.get(i).x, p.segments.get(i).y, {
+        playerId: pid,
+        segmentIndex: i,
+        segment: p.segments.get(i),
+      });
+    }
+  }
 
-        const dx = newHead.x - entry.segment.x;
-        const dy = newHead.y - entry.segment.y;
-        const distSq = dx * dx + dy * dy;
+  // ── Pass 2: Collision detection ───────────────────────────────────
+  // All deaths are collected first, then processed together.  This
+  // ensures two snakes that collide head-to-head in the same tick
+  // both die, regardless of Map iteration order.
 
-        if (distSq < 225) {
-          player.isDead = true;
-          delta.removedPlayerIds.push(playerId);
-          deadPlayerIds.push(playerId);
-          delete delta.playerUpdates[playerId];
-          spawnProtectionUntilByPlayerId.delete(playerId);
+  for (const [playerId, player] of players) {
+    if (player.isDead) continue;
+    if (isPlayerSpawnProtected(playerId, tickNow)) continue;
 
-          // Tell the player who killed them
-          if (!isBot(playerId)) {
-            const killerName = other?.name || 'Unknown';
-            io.to(playerId).emit('killed', { killerName });
-          }
-          
-          // Spawn food where player died (capped to prevent food count explosions)
-          let deathFoodSpawned = 0;
-          for (let si = 0; si < player.segments.length && deathFoodSpawned < MAX_DEATH_FOOD; si += 2) {
-            const seg = player.segments[si];
-            const id = generateFoodId();
-            const newFood: Food = {
-              id,
-              position: { ...seg },
-              value: 3,
-              hue: player.hue,
-            };
-            foods.set(id, newFood);
-            foodCount++;
-            foodGrid.insert(newFood.position.x, newFood.position.y, { id, food: newFood });
-            delta.newFoods.push(newFood);
-            deathFoodSpawned++;
-          }
-          break;
-        }
+    const head = player.segments.get(0);
+    const nearbySegments = segmentGrid.query(head.x, head.y, 15);
+    for (const entry of nearbySegments) {
+      if (entry.playerId === playerId) continue;
+      const other = players.get(entry.playerId);
+      if (!other || other.isDead) continue;
+
+      const dx = head.x - entry.segment.x;
+      const dy = head.y - entry.segment.y;
+      const distSq = dx * dx + dy * dy;
+
+      if (distSq < 225) {
+        pendingDeaths.push({ playerId, killerName: other.name || 'Unknown' });
+        break;
       }
     }
   }
 
-  // Remove dead players — delete from Map directly (no second pass needed)
+  // ── Process deaths ────────────────────────────────────────────────
+  const deadPlayerIds: string[] = [];
+
+  for (const { playerId, killerName } of pendingDeaths) {
+    const player = players.get(playerId);
+    if (!player || player.isDead) continue;
+
+    player.isDead = true;
+    delta.removedPlayerIds.push(playerId);
+    deadPlayerIds.push(playerId);
+    delete delta.playerUpdates[playerId];
+    spawnProtectionUntilByPlayerId.delete(playerId);
+
+    if (!isBot(playerId)) {
+      io.to(playerId).emit('killed', { killerName });
+    }
+
+    // Spawn food where player died (capped to prevent food count explosions)
+    let deathFoodSpawned = 0;
+    for (let si = 0; si < player.segments.length && deathFoodSpawned < MAX_DEATH_FOOD; si += 2) {
+      const seg = player.segments.get(si);
+      const id = generateFoodId();
+      const newFood: Food = {
+        id,
+        position: { ...seg },
+        value: 3,
+        hue: player.hue,
+      };
+      foods.set(id, newFood);
+      foodCount++;
+      foodGrid.insert(newFood.position.x, newFood.position.y, { id, food: newFood });
+      delta.newFoods.push(newFood);
+      deathFoodSpawned++;
+    }
+  }
+
   for (const id of deadPlayerIds) {
     players.delete(id);
     spawnProtectionUntilByPlayerId.delete(id);
@@ -905,18 +994,18 @@ const emitDelta = (delta: DeltaUpdate) => {
       continue;
     }
 
-    const hx = player.segments[0].x;
-    const hy = player.segments[0].y;
+    const hx = player.segments.get(0).x;
+    const hy = player.segments.get(0).y;
     const origin = { x: hx, y: hy };
 
     const outgoingNewPlayers: Player[] = [];
     const seenNewPlayerIds = new Set<string>();
 
-    const enqueuePlayerIfUnknown = (candidate: Player | undefined) => {
+    const enqueuePlayerIfUnknown = (candidate: ServerPlayer | undefined) => {
       if (!candidate || knownPlayerIds.has(candidate.id) || seenNewPlayerIds.has(candidate.id)) {
         return;
       }
-      outgoingNewPlayers.push(candidate);
+      outgoingNewPlayers.push(toWirePlayer(candidate));
       seenNewPlayerIds.add(candidate.id);
       knownPlayerIds.add(candidate.id);
     };
@@ -934,7 +1023,7 @@ const emitDelta = (delta: DeltaUpdate) => {
         }
         const other = players.get(pid);
         if (!other) continue;
-        if (isWithinAoi(origin, other.segments[0])) {
+        if (isWithinAoi(origin, other.segments.get(0))) {
           filteredUpdates[pid] = delta.playerUpdates[pid];
           enqueuePlayerIfUnknown(other);
         }
@@ -945,7 +1034,26 @@ const emitDelta = (delta: DeltaUpdate) => {
 
     for (const candidate of delta.newPlayers) {
       if (candidate.id === socketId || isWithinAoi(origin, candidate.segments[0])) {
-        enqueuePlayerIfUnknown(candidate);
+        if (!knownPlayerIds.has(candidate.id) && !seenNewPlayerIds.has(candidate.id)) {
+          outgoingNewPlayers.push(candidate);
+          seenNewPlayerIds.add(candidate.id);
+          knownPlayerIds.add(candidate.id);
+        }
+      }
+    }
+
+    // Players introduced via newPlayers already carry their post-movement
+    // segments, so strip their playerUpdates entry to prevent the client
+    // from applying a duplicate head insertion.
+    if (seenNewPlayerIds.size > 0) {
+      for (const id of seenNewPlayerIds) {
+        if (id in filteredUpdates) {
+          // Avoid mutating the shared delta.playerUpdates reference
+          if (filteredUpdates === delta.playerUpdates) {
+            filteredUpdates = { ...filteredUpdates };
+          }
+          delete filteredUpdates[id];
+        }
       }
     }
 
@@ -981,6 +1089,24 @@ const emitDelta = (delta: DeltaUpdate) => {
       return true;
     });
 
+    // Purge known players that have left this client's AOI.  They still
+    // exist in the game but are no longer close enough to be visible.
+    // Without this, they freeze in place as ghost snakes on the client.
+    for (const knownId of knownPlayerIds) {
+      if (knownId === socketId) continue;           // never purge self
+      if (seenNewPlayerIds.has(knownId)) continue;   // just entered AOI this tick
+      const knownPlayer = players.get(knownId);
+      if (!knownPlayer || knownPlayer.isDead) {
+        // Already dead/disconnected — clean stale tracking entry
+        knownPlayerIds.delete(knownId);
+        continue;
+      }
+      if (!isWithinAoi(origin, knownPlayer.segments.get(0))) {
+        outgoingRemovedPlayerIds.push(knownId);
+        knownPlayerIds.delete(knownId);
+      }
+    }
+
     const outgoingRemovedFoodIds = delta.removedFoodIds.filter((foodId) => {
       if (!knownFoodIds.has(foodId)) {
         return false;
@@ -1012,7 +1138,7 @@ const updateGame = () => {
 
   const delta: DeltaUpdate = {
     playerUpdates: {},
-    newPlayers: [...pendingNewPlayers],
+    newPlayers: pendingNewPlayers.map(toWirePlayer),
     removedPlayerIds: [...pendingRemovedPlayerIds],
     newFoods: [...pendingNewFoods],
     removedFoodIds: [],

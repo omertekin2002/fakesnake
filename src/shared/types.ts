@@ -60,6 +60,7 @@ export interface PlayerTickUpdate {
   removeTail: number;
   score: number;
   velocity: Vector2;
+  isBoosting: boolean;
 }
 
 export interface DeltaUpdate {
