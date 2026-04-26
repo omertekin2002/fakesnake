@@ -147,21 +147,24 @@ const scoreBotSpawnCandidate = (segments: Vector2[]): number => {
     if (player.isDead || isBot(playerId)) continue;
 
     const viewport = playerViewports.get(playerId) ?? DEFAULT_VIEWPORT;
-    if (isPointInsideViewport(botHead, player.segments.get(0), viewport)) {
+    const otherHead = player.segments.get(0);
+    const otherSegLen = player.segments.length;
+
+    if (isPointInsideViewport(botHead, otherHead, viewport)) {
       viewportPenalty += 100;
     }
 
-    minDistSq = Math.min(minDistSq, distanceSq(botHead, player.segments.get(0)));
+    minDistSq = Math.min(minDistSq, distanceSq(botHead, otherHead));
 
-    for (let i = 0; i < player.segments.length; i += 5) {
+    for (let i = 0; i < otherSegLen; i += 5) {
       minDistSq = Math.min(minDistSq, distanceSq(botHead, player.segments.get(i)));
     }
 
     for (let i = 0; i < segments.length; i += 5) {
-      if (isPointInsideViewport(segments[i], player.segments.get(0), viewport)) {
+      if (isPointInsideViewport(segments[i], otherHead, viewport)) {
         viewportPenalty += 10;
       }
-      minDistSq = Math.min(minDistSq, distanceSq(segments[i], player.segments.get(0)));
+      minDistSq = Math.min(minDistSq, distanceSq(segments[i], otherHead));
     }
   }
 
@@ -177,26 +180,28 @@ const isBotSpawnSafe = (segments: Vector2[]): boolean => {
     if (player.isDead || isBot(playerId)) continue;
 
     const viewport = playerViewports.get(playerId) ?? DEFAULT_VIEWPORT;
+    const otherHead = player.segments.get(0);
+    const otherSegLen = player.segments.length;
 
-    if (distanceSq(botHead, player.segments.get(0)) < headRadiusSq) {
+    if (distanceSq(botHead, otherHead) < headRadiusSq) {
       return false;
     }
 
-    if (isPointInsideViewport(botHead, player.segments.get(0), viewport)) {
+    if (isPointInsideViewport(botHead, otherHead, viewport)) {
       return false;
     }
 
-    for (let i = 0; i < player.segments.length; i += 5) {
+    for (let i = 0; i < otherSegLen; i += 5) {
       if (distanceSq(botHead, player.segments.get(i)) < segmentRadiusSq) {
         return false;
       }
     }
 
     for (let i = 0; i < segments.length; i += 5) {
-      if (isPointInsideViewport(segments[i], player.segments.get(0), viewport)) {
+      if (isPointInsideViewport(segments[i], otherHead, viewport)) {
         return false;
       }
-      if (distanceSq(segments[i], player.segments.get(0)) < segmentRadiusSq) {
+      if (distanceSq(segments[i], otherHead) < segmentRadiusSq) {
         return false;
       }
     }
@@ -239,19 +244,22 @@ const scoreHumanSpawnCandidate = (segments: Vector2[]): number => {
   for (const [playerId, player] of players) {
     if (player.isDead) continue;
 
-    minDistSq = Math.min(minDistSq, distanceSq(head, player.segments.get(0)));
+    const otherHead = player.segments.get(0);
+    const otherSegLen = player.segments.length;
 
-    for (let i = 0; i < player.segments.length; i += 5) {
+    minDistSq = Math.min(minDistSq, distanceSq(head, otherHead));
+
+    for (let i = 0; i < otherSegLen; i += 5) {
       minDistSq = Math.min(minDistSq, distanceSq(head, player.segments.get(i)));
     }
 
     if (!isBot(playerId)) {
       const viewport = playerViewports.get(playerId) ?? DEFAULT_VIEWPORT;
-      if (isPointInsideViewport(head, player.segments.get(0), viewport)) {
+      if (isPointInsideViewport(head, otherHead, viewport)) {
         viewportPenalty += 100;
       }
       for (let i = 0; i < segments.length; i += 5) {
-        if (isPointInsideViewport(segments[i], player.segments.get(0), viewport)) {
+        if (isPointInsideViewport(segments[i], otherHead, viewport)) {
           viewportPenalty += 10;
         }
       }
@@ -269,29 +277,32 @@ const isHumanSpawnSafe = (segments: Vector2[]): boolean => {
   for (const [playerId, player] of players) {
     if (player.isDead) continue;
 
-    if (distanceSq(head, player.segments.get(0)) < headRadiusSq) {
+    const otherHead = player.segments.get(0);
+    const otherSegLen = player.segments.length;
+
+    if (distanceSq(head, otherHead) < headRadiusSq) {
       return false;
     }
 
-    for (let i = 0; i < player.segments.length; i += 5) {
+    for (let i = 0; i < otherSegLen; i += 5) {
       if (distanceSq(head, player.segments.get(i)) < segmentRadiusSq) {
         return false;
       }
     }
 
     for (let i = 0; i < segments.length; i += 5) {
-      if (distanceSq(segments[i], player.segments.get(0)) < segmentRadiusSq) {
+      if (distanceSq(segments[i], otherHead) < segmentRadiusSq) {
         return false;
       }
     }
 
     if (!isBot(playerId)) {
       const viewport = playerViewports.get(playerId) ?? DEFAULT_VIEWPORT;
-      if (isPointInsideViewport(head, player.segments.get(0), viewport)) {
+      if (isPointInsideViewport(head, otherHead, viewport)) {
         return false;
       }
       for (let i = 0; i < segments.length; i += 5) {
-        if (isPointInsideViewport(segments[i], player.segments.get(0), viewport)) {
+        if (isPointInsideViewport(segments[i], otherHead, viewport)) {
           return false;
         }
       }
@@ -392,16 +403,23 @@ const updateBotAI = (player: ServerPlayer): void => {
 };
 
 // ── Spatial Hash Grid ────────────────────────────────────────────────
+// Cell coordinates are encoded as a single integer key (cx * STRIDE + cy)
+// to avoid the per-call string allocation of template-literal keys.
+// STRIDE must exceed the maximum |cy| range; with WORLD_SIZE=3000, cell
+// size 50, and AOI radius 1200, |cy| stays well under 100 — 10007 is a
+// safe prime that prevents any collision.
+const SPATIAL_GRID_KEY_STRIDE = 10007;
+
 class SpatialGrid<T> {
   private cellSize: number;
-  private cells: Map<string, T[]> = new Map();
+  private cells: Map<number, T[]> = new Map();
 
   constructor(cellSize: number) {
     this.cellSize = cellSize;
   }
 
-  private key(cx: number, cy: number): string {
-    return `${cx},${cy}`;
+  private key(cx: number, cy: number): number {
+    return cx * SPATIAL_GRID_KEY_STRIDE + cy;
   }
 
   clear(): void {
@@ -887,11 +905,13 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
   segmentGrid.clear();
   for (const [pid, p] of players) {
     if (p.isDead || isPlayerSpawnProtected(pid, tickNow)) continue;
-    for (let i = 0; i < p.segments.length; i++) {
-      segmentGrid.insert(p.segments.get(i).x, p.segments.get(i).y, {
+    const segLen = p.segments.length;
+    for (let i = 0; i < segLen; i++) {
+      const seg = p.segments.get(i);
+      segmentGrid.insert(seg.x, seg.y, {
         playerId: pid,
         segmentIndex: i,
-        segment: p.segments.get(i),
+        segment: seg,
       });
     }
   }
