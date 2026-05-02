@@ -2,6 +2,8 @@ export type Rgb = { r: number; g: number; b: number };
 
 export const hueToHsl = (hue: number) => `hsl(${hue}, 80%, 60%)`;
 
+const clampChannel = (value: number): number => Math.max(0, Math.min(255, Math.round(value)));
+
 export const hexToRgb = (hex: string): Rgb => {
   const normalized = hex.replace('#', '');
   const source = normalized.length === 3
@@ -16,11 +18,24 @@ export const hexToRgb = (hex: string): Rgb => {
   };
 };
 
+const cssColorToRgb = (color: string): Rgb => {
+  const rgbMatch = color.match(/^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/i);
+  if (rgbMatch) {
+    return {
+      r: clampChannel(Number(rgbMatch[1])),
+      g: clampChannel(Number(rgbMatch[2])),
+      b: clampChannel(Number(rgbMatch[3])),
+    };
+  }
+
+  return hexToRgb(color);
+};
+
 export const rgbToCss = ({ r, g, b }: Rgb): string => `rgb(${r}, ${g}, ${b})`;
 
 export const mixColors = (from: string, to: string, amount: number): string => {
-  const start = hexToRgb(from);
-  const end = hexToRgb(to);
+  const start = cssColorToRgb(from);
+  const end = cssColorToRgb(to);
   const t = Math.max(0, Math.min(1, amount));
 
   return rgbToCss({
@@ -31,6 +46,6 @@ export const mixColors = (from: string, to: string, amount: number): string => {
 };
 
 export const withAlpha = (hex: string, alpha: number): string => {
-  const color = hexToRgb(hex);
+  const color = cssColorToRgb(hex);
   return `rgba(${color.r}, ${color.g}, ${color.b}, ${alpha})`;
 };

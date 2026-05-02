@@ -740,12 +740,14 @@ io.on('connection', (socket) => {
       }
     }
 
-    players.delete(socket.id);
+    if (disconnectedPlayer) {
+      players.delete(socket.id);
+      pendingRemovedPlayerIds.push(socket.id);
+    }
     playerViewports.delete(socket.id);
     knownPlayerIdsBySocket.delete(socket.id);
     knownFoodIdsBySocket.delete(socket.id);
     spawnProtectionUntilByPlayerId.delete(socket.id);
-    pendingRemovedPlayerIds.push(socket.id);
   });
 });
 
@@ -1134,6 +1136,20 @@ const emitDelta = (delta: DeltaUpdate) => {
       knownFoodIds.delete(foodId);
       return true;
     });
+
+    // Keep server-side AOI tracking aligned with what the client should retain.
+    // Otherwise a locally-pruned food can remain marked as known and never be sent again.
+    for (const knownFoodId of knownFoodIds) {
+      const knownFood = foods.get(knownFoodId);
+      if (!knownFood) {
+        knownFoodIds.delete(knownFoodId);
+        continue;
+      }
+      if (!isWithinAoi(origin, knownFood.position)) {
+        outgoingRemovedFoodIds.push(knownFoodId);
+        knownFoodIds.delete(knownFoodId);
+      }
+    }
 
     socket.emit('delta', {
       playerUpdates: filteredUpdates,

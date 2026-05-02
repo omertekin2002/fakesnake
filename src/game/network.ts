@@ -1,4 +1,4 @@
-import { MutableRefObject, useEffect, useRef } from 'react';
+import { MutableRefObject, useCallback, useEffect, useMemo, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
 import {
   DeltaUpdate,
@@ -222,6 +222,10 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
         callbacksRef.current.onScoreChange(localState.players[myId].score);
       } else if (myId && !localState.players[myId]) {
         callbacksRef.current.onDeath();
+        newSocket.disconnect();
+        if (socketRef.current === newSocket) {
+          socketRef.current = null;
+        }
       }
     });
 
@@ -238,22 +242,22 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionVersion]);
 
-  const resetGameRefs = () => {
+  const resetGameRefs = useCallback(() => {
     gameStateRef.current = null;
     myIdRef.current = null;
     scoreParticlesRef.current = [];
     deathParticlesRef.current = [];
     interpRef.current.clear();
-  };
+  }, []);
 
-  const disconnect = () => {
+  const disconnect = useCallback(() => {
     socketRef.current?.disconnect();
     socketRef.current = null;
     gameStateRef.current = null;
     myIdRef.current = null;
-  };
+  }, []);
 
-  return {
+  return useMemo(() => ({
     socketRef,
     gameStateRef,
     worldSummaryRef,
@@ -264,5 +268,5 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
     deathParticlesRef,
     resetGameRefs,
     disconnect,
-  };
+  }), [disconnect, resetGameRefs]);
 };
