@@ -687,23 +687,36 @@ io.on('connection', (socket) => {
   let lastInputTime = 0;
   let lastViewportTime = 0;
 
-  socket.on('input', (data: { x: number; y: number; boost?: boolean }) => {
+  socket.on('input', (data: unknown) => {
     const now = Date.now();
     if (now - lastInputTime < INPUT_RATE_LIMIT_MS) return;
     lastInputTime = now;
 
     const player = players.get(socket.id);
     if (player && !player.isDead) {
-      if (Number.isFinite(data.x) && Number.isFinite(data.y)) {
-        const length = Math.sqrt(data.x ** 2 + data.y ** 2);
-        if (length > 0) {
-          player.targetDirection = {
-            x: data.x / length,
-            y: data.y / length,
-          };
+      if (data && typeof data === 'object') {
+        const input = data as { x?: unknown; y?: unknown; boost?: unknown };
+        const x = Number(input.x);
+        const y = Number(input.y);
+
+        if (Number.isFinite(x) && Number.isFinite(y)) {
+          const length = Math.sqrt(x ** 2 + y ** 2);
+          if (length > 0) {
+            const nextDirection = {
+              x: x / length,
+              y: y / length,
+            };
+
+            if (Number.isFinite(nextDirection.x) && Number.isFinite(nextDirection.y)) {
+              player.targetDirection = nextDirection;
+            }
+          }
         }
+
+        player.isBoosting = input.boost === true;
+      } else {
+        player.isBoosting = false;
       }
-      player.isBoosting = !!data.boost;
     }
   });
 
@@ -1033,25 +1046,21 @@ const emitDelta = (delta: DeltaUpdate) => {
     };
 
     // Filter playerUpdates by AOI (always include own update)
-    let filteredUpdates = delta.playerUpdates;
+    let filteredUpdates: DeltaUpdate['playerUpdates'] = {};
     const updateKeys = Object.keys(delta.playerUpdates);
-    if (updateKeys.length > 1) {
-      filteredUpdates = {};
-      for (const pid of updateKeys) {
-        if (pid === socketId) {
-          filteredUpdates[pid] = delta.playerUpdates[pid];
-          enqueuePlayerIfUnknown(players.get(pid));
-          continue;
-        }
-        const other = players.get(pid);
-        if (!other) continue;
-        if (isWithinAoi(origin, other.segments.get(0))) {
-          filteredUpdates[pid] = delta.playerUpdates[pid];
-          enqueuePlayerIfUnknown(other);
-        }
+    for (const pid of updateKeys) {
+      if (pid === socketId) {
+        filteredUpdates[pid] = delta.playerUpdates[pid];
+        enqueuePlayerIfUnknown(players.get(pid));
+        continue;
       }
-    } else if (updateKeys.length === 1) {
-      enqueuePlayerIfUnknown(players.get(updateKeys[0]));
+
+      const other = players.get(pid);
+      if (!other) continue;
+      if (isWithinAoi(origin, other.segments.get(0))) {
+        filteredUpdates[pid] = delta.playerUpdates[pid];
+        enqueuePlayerIfUnknown(other);
+      }
     }
 
     for (const candidate of delta.newPlayers) {
@@ -1069,13 +1078,7 @@ const emitDelta = (delta: DeltaUpdate) => {
     // from applying a duplicate head insertion.
     if (seenNewPlayerIds.size > 0) {
       for (const id of seenNewPlayerIds) {
-        if (id in filteredUpdates) {
-          // Avoid mutating the shared delta.playerUpdates reference
-          if (filteredUpdates === delta.playerUpdates) {
-            filteredUpdates = { ...filteredUpdates };
-          }
-          delete filteredUpdates[id];
-        }
+        delete filteredUpdates[id];
       }
     }
 
