@@ -23,7 +23,8 @@ const TURN_SPEED = 5; // radians per second
 const FOOD_COUNT = 500;
 const FOOD_SPAWN_RATE = 10; // per second
 const SEGMENT_DISTANCE = 200 / 30; // SNAKE_SPEED / TICK_RATE
-const SPATIAL_CELL_SIZE = 50;
+const SEGMENT_CELL_SIZE = 50;
+const FOOD_CELL_SIZE = 300;
 const BOOST_SPEED_MULTIPLIER = 2;
 const BOOST_MIN_LENGTH = 10;
 const AOI_RADIUS = 1200;
@@ -376,6 +377,7 @@ const updateBotAI = (player: ServerPlayer): void => {
   let bestFood: Food | null = null;
   let bestDistSq = Infinity;
   for (const entry of nearby) {
+    if (!foods.has(entry.id)) continue;
     const dx = entry.food.position.x - head.x;
     const dy = entry.food.position.y - head.y;
     const distSq = dx * dx + dy * dy;
@@ -423,7 +425,9 @@ class SpatialGrid<T> {
   }
 
   clear(): void {
-    this.cells.clear();
+    for (const bucket of this.cells.values()) {
+      bucket.length = 0;
+    }
   }
 
   insert(x: number, y: number, item: T): void {
@@ -535,8 +539,8 @@ const toWirePlayer = (p: ServerPlayer): Player => ({
 type FoodEntry = { id: string; food: Food };
 type SegmentEntry = { playerId: string; segmentIndex: number; segment: Vector2 };
 
-const foodGrid = new SpatialGrid<FoodEntry>(SPATIAL_CELL_SIZE);
-const segmentGrid = new SpatialGrid<SegmentEntry>(SPATIAL_CELL_SIZE);
+const foodGrid = new SpatialGrid<FoodEntry>(FOOD_CELL_SIZE);
+const segmentGrid = new SpatialGrid<SegmentEntry>(SEGMENT_CELL_SIZE);
 
 const app = express();
 const httpServer = createServer(app);

@@ -269,7 +269,7 @@ export default function App() {
       for (const playerId in gameState.players) {
         const player = gameState.players[playerId];
         const head = lerpHead(playerId, player.segments[0]);
-        drawSnake(ctx, player, head, camera);
+        drawSnake(ctx, player, head, camera, interpT);
       }
 
       const now = performance.now();

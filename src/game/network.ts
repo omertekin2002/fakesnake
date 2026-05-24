@@ -18,11 +18,14 @@ export type InterpState = { prevX: number; prevY: number; currX: number; currY: 
 export const applyDelta = (localState: GameState, delta: DeltaUpdate): void => {
   for (const player of delta.newPlayers) {
     localState.players[player.id] = player;
+    player.prevSegments = player.segments.map((seg) => ({ x: seg.x, y: seg.y }));
   }
 
   for (const playerId in delta.playerUpdates) {
     const player = localState.players[playerId];
     if (!player) continue;
+
+    player.prevSegments = player.segments.map((seg) => ({ x: seg.x, y: seg.y }));
 
     const update = delta.playerUpdates[playerId];
     player.segments.unshift(update.newHead);
@@ -193,6 +196,12 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
 
     newSocket.on('init', (data: InitPayload) => {
       myIdRef.current = data.id;
+      if (data.state && data.state.players) {
+        for (const pid in data.state.players) {
+          const p = data.state.players[pid];
+          p.prevSegments = p.segments.map((seg) => ({ x: seg.x, y: seg.y }));
+        }
+      }
       gameStateRef.current = data.state;
       worldSummaryRef.current = data.summary;
       callbacksRef.current.onConnected();

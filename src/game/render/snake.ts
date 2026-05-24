@@ -101,18 +101,30 @@ export const drawSnake = (
   player: Player,
   interpolatedHead: Vector2,
   camera: Camera,
+  interpT: number,
 ) => {
   const skin = player.appearance ?? DEFAULT_SNAKE_APPEARANCE;
   const palette = getSnakePalette(skin.paletteId);
   const totalSegments = player.segments.length;
   const head = interpolatedHead;
 
+  const prevSegs = player.prevSegments;
   for (let i = player.segments.length - 1; i > 0; i--) {
     const segment = player.segments[i];
-    if (isInViewport(segment.x, segment.y, camera, 30)) {
+    const prevSegment = prevSegs?.[i];
+
+    let sx = segment.x;
+    let sy = segment.y;
+
+    if (prevSegment) {
+      sx = prevSegment.x + (segment.x - prevSegment.x) * interpT;
+      sy = prevSegment.y + (segment.y - prevSegment.y) * interpT;
+    }
+
+    if (isInViewport(sx, sy, camera, 30)) {
       const radius = getSegmentRadius(i, totalSegments, skin, 15);
       const fillColor = getSegmentColor(i, totalSegments, skin);
-      drawSegmentCircle(ctx, segment.x, segment.y, radius, fillColor, palette.highlight);
+      drawSegmentCircle(ctx, sx, sy, radius, fillColor, palette.highlight);
     }
   }
 
