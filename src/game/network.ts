@@ -13,19 +13,14 @@ import {
 } from '../shared/skins';
 import { DeathParticle, ScoreParticle } from './render/particles';
 
-export type InterpState = { prevX: number; prevY: number; currX: number; currY: number };
-
 export const applyDelta = (localState: GameState, delta: DeltaUpdate): void => {
   for (const player of delta.newPlayers) {
     localState.players[player.id] = player;
-    player.prevSegments = player.segments.map((seg) => ({ x: seg.x, y: seg.y }));
   }
 
   for (const playerId in delta.playerUpdates) {
     const player = localState.players[playerId];
     if (!player) continue;
-
-    player.prevSegments = player.segments.map((seg) => ({ x: seg.x, y: seg.y }));
 
     const update = delta.playerUpdates[playerId];
     player.segments.unshift(update.newHead);
@@ -107,22 +102,7 @@ const spawnDeathParticles = (
   }
 };
 
-const captureInterpState = (
-  localState: GameState,
-  delta: DeltaUpdate,
-  interp: Map<string, InterpState>,
-) => {
-  for (const playerId in delta.playerUpdates) {
-    const player = localState.players[playerId];
-    if (!player) continue;
-    const prev = player.segments[0];
-    const curr = delta.playerUpdates[playerId].newHead;
-    interp.set(playerId, { prevX: prev.x, prevY: prev.y, currX: curr.x, currY: curr.y });
-  }
-  for (const pid of delta.removedPlayerIds) {
-    interp.delete(pid);
-  }
-};
+
 
 export type UseGameNetworkOptions = {
   sessionVersion: number;
@@ -140,8 +120,6 @@ export type GameNetworkHandles = {
   gameStateRef: MutableRefObject<GameState | null>;
   worldSummaryRef: MutableRefObject<WorldSummary>;
   myIdRef: MutableRefObject<string | null>;
-  interpRef: MutableRefObject<Map<string, InterpState>>;
-  lastDeltaTimeRef: MutableRefObject<number>;
   scoreParticlesRef: MutableRefObject<ScoreParticle[]>;
   deathParticlesRef: MutableRefObject<DeathParticle[]>;
   resetGameRefs: () => void;
@@ -170,8 +148,6 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
     worldSize: DEFAULT_WORLD_SIZE,
   });
   const myIdRef = useRef<string | null>(null);
-  const interpRef = useRef<Map<string, InterpState>>(new Map());
-  const lastDeltaTimeRef = useRef(0);
   const scoreParticlesRef = useRef<ScoreParticle[]>([]);
   const deathParticlesRef = useRef<DeathParticle[]>([]);
 
@@ -196,12 +172,6 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
 
     newSocket.on('init', (data: InitPayload) => {
       myIdRef.current = data.id;
-      if (data.state && data.state.players) {
-        for (const pid in data.state.players) {
-          const p = data.state.players[pid];
-          p.prevSegments = p.segments.map((seg) => ({ x: seg.x, y: seg.y }));
-        }
-      }
       gameStateRef.current = data.state;
       worldSummaryRef.current = data.summary;
       callbacksRef.current.onConnected();
@@ -220,9 +190,6 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
       if (delta.removedPlayerIds.length > 0) {
         spawnDeathParticles(localState, delta, deathParticlesRef.current, now);
       }
-
-      captureInterpState(localState, delta, interpRef.current);
-      lastDeltaTimeRef.current = now;
 
       applyDelta(localState, delta);
       worldSummaryRef.current = delta.summary;
@@ -256,7 +223,6 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
     myIdRef.current = null;
     scoreParticlesRef.current = [];
     deathParticlesRef.current = [];
-    interpRef.current.clear();
   }, []);
 
   const disconnect = useCallback(() => {
@@ -271,8 +237,6 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
     gameStateRef,
     worldSummaryRef,
     myIdRef,
-    interpRef,
-    lastDeltaTimeRef,
     scoreParticlesRef,
     deathParticlesRef,
     resetGameRefs,

@@ -16,7 +16,7 @@ export interface Player {
   score: number;
   isDead: boolean;
   isBoosting: boolean;
-  prevSegments?: Vector2[];
+  smoothSegments?: Vector2[];
 }
 
 export interface Food {

@@ -215,6 +215,7 @@ export default function App() {
 
     let animationFrameId = 0;
     let lastFoodPruneTime = 0;
+    let lastRenderTime = performance.now();
     const leaderboardCache = createLeaderboardCache();
 
     const render = (time: number) => {
@@ -235,18 +236,42 @@ export default function App() {
       ctx.fillStyle = '#1a1a1a';
       ctx.fillRect(0, 0, windowSize.width, windowSize.height);
 
-      const interpMap = network.interpRef.current;
-      const interpT = Math.min((time - network.lastDeltaTimeRef.current) / TICK_MS, 1);
-      const lerpHead = (id: string, fallback: { x: number; y: number }) => {
-        const s = interpMap.get(id);
-        if (!s) return fallback;
-        return {
-          x: s.prevX + (s.currX - s.prevX) * interpT,
-          y: s.prevY + (s.currY - s.prevY) * interpT,
-        };
-      };
+      const nowTime = performance.now();
+      const dt = Math.min((nowTime - lastRenderTime) / 1000, 0.1);
+      lastRenderTime = nowTime;
 
-      const myHead = lerpHead(myId!, me.segments[0]);
+      // Exponential Easing Smoothing
+      const k = 16; // Easing factor (larger = faster catchup, lower latency)
+      const lerpRate = 1 - Math.exp(-k * dt);
+
+      for (const playerId in gameState.players) {
+        const player = gameState.players[playerId];
+
+        if (!player.smoothSegments || player.smoothSegments.length !== player.segments.length) {
+          if (player.smoothSegments && Math.abs(player.smoothSegments.length - player.segments.length) <= 2) {
+            if (player.smoothSegments.length < player.segments.length) {
+              while (player.smoothSegments.length < player.segments.length) {
+                player.smoothSegments.unshift({ ...player.segments[0] });
+              }
+            } else {
+              while (player.smoothSegments.length > player.segments.length) {
+                player.smoothSegments.pop();
+              }
+            }
+          } else {
+            player.smoothSegments = player.segments.map((seg) => ({ ...seg }));
+          }
+        } else {
+          for (let i = 0; i < player.segments.length; i++) {
+            const target = player.segments[i];
+            const smooth = player.smoothSegments[i];
+            smooth.x += (target.x - smooth.x) * lerpRate;
+            smooth.y += (target.y - smooth.y) * lerpRate;
+          }
+        }
+      }
+
+      const myHead = me.smoothSegments?.[0] || me.segments[0];
       const camera = {
         x: myHead.x - windowSize.width / 2,
         y: myHead.y - windowSize.height / 2,
@@ -268,8 +293,7 @@ export default function App() {
 
       for (const playerId in gameState.players) {
         const player = gameState.players[playerId];
-        const head = lerpHead(playerId, player.segments[0]);
-        drawSnake(ctx, player, head, camera, interpT);
+        drawSnake(ctx, player, camera);
       }
 
       const now = performance.now();
