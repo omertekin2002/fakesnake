@@ -28,6 +28,10 @@ const PORT = Number(process.env.PORT) || 3000;
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN ?? '*';
 // Max simultaneous socket connections from a single IP (anti-abuse).
 const MAX_CONNECTIONS_PER_IP = Number(process.env.MAX_CONNECTIONS_PER_IP) || 8;
+// Only trust the X-Forwarded-For header when explicitly behind a proxy that
+// sets it (e.g. Render). Off by default so a directly-exposed server can't be
+// tricked by a spoofed XFF into bypassing the per-IP connection cap.
+const TRUST_PROXY = process.env.TRUST_PROXY === 'true';
 // Physics constants (TICK_RATE, WORLD_SIZE, SNAKE_SPEED, TURN_SPEED,
 // SEGMENT_DISTANCE, BOOST_*, INITIAL_SNAKE_LENGTH, FIXED_DT) now live in
 // src/shared/constants.ts so the client prediction stays in lock-step.
@@ -555,6 +559,10 @@ const io = new Server(httpServer, {
   cors: {
     origin: ALLOWED_ORIGIN === '*' ? '*' : ALLOWED_ORIGIN.split(',').map((o) => o.trim()),
   },
+  // Game messages are tiny ({x,y,boost,seq} input, small handshake auth); cap
+  // payload size so a client can't send oversized frames to exhaust memory.
+  // Default is 1e6 (1MB).
+  maxHttpBufferSize: 1e4, // 10 KB
 });
 
 // ── Connection rate limiting per IP ─────────────────────────────────
@@ -563,9 +571,17 @@ const io = new Server(httpServer, {
 const connectionsByIp = new Map<string, number>();
 
 const getClientIp = (socket: Socket): string => {
-  const forwarded = socket.handshake.headers['x-forwarded-for'];
-  if (typeof forwarded === 'string' && forwarded.length > 0) {
-    return forwarded.split(',')[0].trim(); // first hop = real client behind a proxy
+  if (TRUST_PROXY) {
+    const forwarded = socket.handshake.headers['x-forwarded-for'];
+    if (typeof forwarded === 'string' && forwarded.length > 0) {
+      // Use the LAST hop: the address appended by our immediately-upstream
+      // trusted proxy. Earlier entries are supplied by the client and are
+      // therefore spoofable, so trusting the first hop would let a client forge
+      // a unique (or a victim's) IP to evade/weaponize the per-IP cap.
+      const hops = forwarded.split(',');
+      const realIp = hops[hops.length - 1].trim();
+      if (realIp) return realIp;
+    }
   }
   return socket.handshake.address;
 };

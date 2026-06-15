@@ -67,6 +67,30 @@ export const drawSegmentCircle = (
   fillColor: string,
   highlightColor: string,
 ) => {
+  drawSegmentGradient(
+    ctx,
+    x,
+    y,
+    radius,
+    mixColors(fillColor, highlightColor, 0.72),
+    fillColor,
+    mixColors(fillColor, '#050505', 0.28),
+    withAlpha(highlightColor, 0.22),
+  );
+};
+
+// Low-level draw using already-resolved colours, so the per-segment colour math
+// (mixColors/withAlpha string parsing) can be memoized by the caller.
+const drawSegmentGradient = (
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  radius: number,
+  litColor: string,
+  fillColor: string,
+  darkColor: string,
+  strokeColor: string,
+) => {
   const gradient = ctx.createRadialGradient(
     x - radius * 0.38,
     y - radius * 0.42,
@@ -75,17 +99,51 @@ export const drawSegmentCircle = (
     y,
     radius,
   );
-  gradient.addColorStop(0, mixColors(fillColor, highlightColor, 0.72));
+  gradient.addColorStop(0, litColor);
   gradient.addColorStop(0.52, fillColor);
-  gradient.addColorStop(1, mixColors(fillColor, '#050505', 0.28));
+  gradient.addColorStop(1, darkColor);
 
   ctx.fillStyle = gradient;
   ctx.beginPath();
   ctx.arc(x, y, radius, 0, Math.PI * 2);
   ctx.fill();
-  ctx.strokeStyle = withAlpha(highlightColor, 0.22);
+  ctx.strokeStyle = strokeColor;
   ctx.lineWidth = Math.max(1, radius * 0.08);
   ctx.stroke();
+};
+
+// A body segment's radius and three gradient stop colours are a pure function of
+// (appearance, segmentIndex, totalSegments, headRadius). Computing them means
+// several mixColors() calls, each regex-parsing colour strings — hundreds of
+// times per frame for a long snake. They only change when the snake's length
+// changes, so memoize them; cache is keyed by everything they depend on.
+type BodySegmentStyle = { radius: number; fill: string; lit: string; dark: string };
+const bodyStyleCache = new Map<string, BodySegmentStyle>();
+const BODY_STYLE_CACHE_LIMIT = 60_000;
+
+const getBodySegmentStyle = (
+  appearance: SnakeAppearance,
+  segmentIndex: number,
+  totalSegments: number,
+  headRadius: number,
+  highlightColor: string,
+): BodySegmentStyle => {
+  const key = `${appearance.paletteId}:${appearance.patternId}:${appearance.taperId}:${segmentIndex}:${totalSegments}:${headRadius}`;
+  const cached = bodyStyleCache.get(key);
+  if (cached) return cached;
+
+  const fill = getSegmentColor(segmentIndex, totalSegments, appearance);
+  const style: BodySegmentStyle = {
+    radius: getSegmentRadius(segmentIndex, totalSegments, appearance, headRadius),
+    fill,
+    lit: mixColors(fill, highlightColor, 0.72),
+    dark: mixColors(fill, '#050505', 0.28),
+  };
+  // Bound memory across a long session: totals climb as snakes grow, so the key
+  // space is unbounded. A wholesale clear is cheap relative to the per-frame win.
+  if (bodyStyleCache.size >= BODY_STYLE_CACHE_LIMIT) bodyStyleCache.clear();
+  bodyStyleCache.set(key, style);
+  return style;
 };
 
 export type Camera = { x: number; y: number; width: number; height: number };
@@ -109,12 +167,24 @@ export const drawSnake = (
   const renderSegments = player.smoothSegments || player.segments;
   const head = renderSegments[0];
 
+  // The stroke colour is constant for the whole snake, so resolve it once
+  // instead of per segment.
+  const segmentStroke = withAlpha(palette.highlight, 0.22);
+
   for (let i = renderSegments.length - 1; i > 0; i--) {
     const segment = renderSegments[i];
     if (isInViewport(segment.x, segment.y, camera, 30)) {
-      const radius = getSegmentRadius(i, totalSegments, skin, 15);
-      const fillColor = getSegmentColor(i, totalSegments, skin);
-      drawSegmentCircle(ctx, segment.x, segment.y, radius, fillColor, palette.highlight);
+      const style = getBodySegmentStyle(skin, i, totalSegments, 15, palette.highlight);
+      drawSegmentGradient(
+        ctx,
+        segment.x,
+        segment.y,
+        style.radius,
+        style.lit,
+        style.fill,
+        style.dark,
+        segmentStroke,
+      );
     }
   }
 

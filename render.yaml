@@ -6,3 +6,11 @@ services:
     startCommand: npm run start
     healthCheckPath: /api/health
     autoDeploy: true
+    envVars:
+      # Serve the prebuilt dist/ bundle rather than the Vite dev server.
+      - key: NODE_ENV
+        value: production
+      # Render terminates TLS and sets X-Forwarded-For, so trust it for the
+      # per-IP connection cap (the real client IP is the last XFF hop).
+      - key: TRUST_PROXY
+        value: "true"
