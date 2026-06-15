@@ -18,6 +18,12 @@ import {
   reconcilePrediction,
   seedPrediction,
 } from './prediction';
+import {
+  createInterpBuffer,
+  InterpBuffer,
+  recordSnapshot,
+  removeInterpPlayer,
+} from './interpolation';
 
 export const applyDelta = (localState: GameState, delta: DeltaUpdate): void => {
   for (const player of delta.newPlayers) {
@@ -119,6 +125,7 @@ export type UseGameNetworkOptions = {
   onScoreChange: (score: number) => void;
   onDeath: () => void;
   onKilled: (killerName: string) => void;
+  onConnectionLost: () => void;
 };
 
 export type GameNetworkHandles = {
@@ -129,6 +136,7 @@ export type GameNetworkHandles = {
   scoreParticlesRef: MutableRefObject<ScoreParticle[]>;
   deathParticlesRef: MutableRefObject<DeathParticle[]>;
   predictionRef: MutableRefObject<PredictionState>;
+  interpBufferRef: MutableRefObject<InterpBuffer>;
   resetGameRefs: () => void;
   disconnect: () => void;
 };
@@ -145,6 +153,7 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
     onScoreChange,
     onDeath,
     onKilled,
+    onConnectionLost,
   } = options;
 
   const socketRef = useRef<Socket | null>(null);
@@ -158,18 +167,28 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
   const scoreParticlesRef = useRef<ScoreParticle[]>([]);
   const deathParticlesRef = useRef<DeathParticle[]>([]);
   const predictionRef = useRef<PredictionState>(createPredictionState());
+  const interpBufferRef = useRef<InterpBuffer>(createInterpBuffer());
 
-  const callbacksRef = useRef({ onConnected, onScoreChange, onDeath, onKilled });
+  const callbacksRef = useRef({ onConnected, onScoreChange, onDeath, onKilled, onConnectionLost });
   useEffect(() => {
-    callbacksRef.current = { onConnected, onScoreChange, onDeath, onKilled };
-  }, [onConnected, onScoreChange, onDeath, onKilled]);
+    callbacksRef.current = { onConnected, onScoreChange, onDeath, onKilled, onConnectionLost };
+  }, [onConnected, onScoreChange, onDeath, onKilled, onConnectionLost]);
+
+  // Distinguishes intentional teardowns (death, menu, session change) from real
+  // connection loss, so only the latter surfaces a "connection lost" screen.
+  const intentionalDisconnectRef = useRef(false);
 
   useEffect(() => {
     if (sessionVersion === 0) {
       return;
     }
 
+    intentionalDisconnectRef.current = false;
+    // Auto-reconnect is off: the server can't resume a dropped snake, so a silent
+    // reconnect would teleport the player into a fresh body. We surface the drop
+    // instead and let the user rejoin explicitly.
     const newSocket = io(window.location.origin, {
+      reconnection: false,
       auth: {
         name: playerNameRef.current.trim() || undefined,
         appearance: appearanceRef.current,
@@ -221,10 +240,21 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
         }
       }
 
+      // Buffer remote snake trails for entity interpolation.
+      const interp = interpBufferRef.current;
+      for (const removedId of delta.removedPlayerIds) {
+        removeInterpPlayer(interp, removedId);
+      }
+      for (const id in localState.players) {
+        if (id === myId) continue;
+        recordSnapshot(interp, id, localState.players[id].segments, now);
+      }
+
       if (myId && localState.players[myId]) {
         callbacksRef.current.onScoreChange(localState.players[myId].score);
       } else if (myId && !localState.players[myId]) {
         callbacksRef.current.onDeath();
+        intentionalDisconnectRef.current = true;
         newSocket.disconnect();
         if (socketRef.current === newSocket) {
           socketRef.current = null;
@@ -236,7 +266,20 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
       callbacksRef.current.onKilled(data.killerName);
     });
 
+    // Unexpected drop (transport close, ping timeout, server restart) or a
+    // failed initial connect (e.g. rejected by the per-IP limit).
+    newSocket.on('disconnect', () => {
+      if (intentionalDisconnectRef.current) return;
+      if (socketRef.current === newSocket) socketRef.current = null;
+      callbacksRef.current.onConnectionLost();
+    });
+    newSocket.on('connect_error', () => {
+      if (intentionalDisconnectRef.current) return;
+      callbacksRef.current.onConnectionLost();
+    });
+
     return () => {
+      intentionalDisconnectRef.current = true;
       newSocket.disconnect();
       if (socketRef.current === newSocket) {
         socketRef.current = null;
@@ -251,14 +294,17 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
     scoreParticlesRef.current = [];
     deathParticlesRef.current = [];
     predictionRef.current = createPredictionState();
+    interpBufferRef.current = createInterpBuffer();
   }, []);
 
   const disconnect = useCallback(() => {
+    intentionalDisconnectRef.current = true;
     socketRef.current?.disconnect();
     socketRef.current = null;
     gameStateRef.current = null;
     myIdRef.current = null;
     predictionRef.current = createPredictionState();
+    interpBufferRef.current = createInterpBuffer();
   }, []);
 
   return useMemo(() => ({
@@ -269,6 +315,7 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
     scoreParticlesRef,
     deathParticlesRef,
     predictionRef,
+    interpBufferRef,
     resetGameRefs,
     disconnect,
   }), [disconnect, resetGameRefs]);

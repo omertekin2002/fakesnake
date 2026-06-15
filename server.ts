@@ -1,7 +1,7 @@
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import { createServer } from 'http';
-import { Server } from 'socket.io';
+import { Server, Socket } from 'socket.io';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { Player, Food, GameState, Vector2, DeltaUpdate, WorldSummary } from './src/shared/types.js';
@@ -24,6 +24,10 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DIST_DIR = path.join(__dirname, 'dist');
 const PORT = Number(process.env.PORT) || 3000;
+// Comma-separated allowlist of origins, or '*' (default) to allow any.
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN ?? '*';
+// Max simultaneous socket connections from a single IP (anti-abuse).
+const MAX_CONNECTIONS_PER_IP = Number(process.env.MAX_CONNECTIONS_PER_IP) || 8;
 // Physics constants (TICK_RATE, WORLD_SIZE, SNAKE_SPEED, TURN_SPEED,
 // SEGMENT_DISTANCE, BOOST_*, INITIAL_SNAKE_LENGTH, FIXED_DT) now live in
 // src/shared/constants.ts so the client prediction stays in lock-step.
@@ -549,8 +553,39 @@ const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {
-    origin: '*',
+    origin: ALLOWED_ORIGIN === '*' ? '*' : ALLOWED_ORIGIN.split(',').map((o) => o.trim()),
   },
+});
+
+// ── Connection rate limiting per IP ─────────────────────────────────
+// Reject excess simultaneous connections from a single address so a client
+// can't spawn unlimited snakes or exhaust the server.
+const connectionsByIp = new Map<string, number>();
+
+const getClientIp = (socket: Socket): string => {
+  const forwarded = socket.handshake.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.length > 0) {
+    return forwarded.split(',')[0].trim(); // first hop = real client behind a proxy
+  }
+  return socket.handshake.address;
+};
+
+const releaseIp = (ip: string): void => {
+  const count = connectionsByIp.get(ip);
+  if (count === undefined) return;
+  if (count <= 1) connectionsByIp.delete(ip);
+  else connectionsByIp.set(ip, count - 1);
+};
+
+io.use((socket, next) => {
+  const ip = getClientIp(socket);
+  const count = connectionsByIp.get(ip) ?? 0;
+  if (count >= MAX_CONNECTIONS_PER_IP) {
+    next(new Error('Too many connections from this address'));
+    return;
+  }
+  connectionsByIp.set(ip, count + 1);
+  next();
 });
 
 // ── Server-side state using Maps for faster iteration/deletion ──────
@@ -777,6 +812,7 @@ io.on('connection', (socket) => {
     knownFoodIdsBySocket.delete(socket.id);
     spawnProtectionUntilByPlayerId.delete(socket.id);
     lastInputSeqByPlayer.delete(socket.id);
+    releaseIp(getClientIp(socket));
   });
 });
 

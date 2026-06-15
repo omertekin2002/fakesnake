@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { DEFAULT_SNAKE_APPEARANCE, SnakeAppearance } from './shared/skins';
 import { useGameNetwork } from './game/network';
 import { predictInput } from './game/prediction';
+import { INTERP_DELAY_MS, writeInterpolatedSnake } from './game/interpolation';
 import { drawGrid, drawWorldBorder } from './game/render/grid';
 import { drawFoods, pruneDistantFoods } from './game/render/food';
 import { drawSnake } from './game/render/snake';
@@ -17,13 +18,14 @@ import {
 import { MainMenu } from './components/MainMenu';
 import { ConnectingOverlay } from './components/ConnectingOverlay';
 import { DeathScreen } from './components/DeathScreen';
+import { ConnectionLostScreen } from './components/ConnectionLostScreen';
 import { ExitButton } from './components/ExitButton';
 
 const TICK_MS = 1000 / 30;
 const FOOD_PRUNE_INTERVAL = 2000;
 const FOOD_PRUNE_MARGIN = 1400;
 
-type GamePhase = 'menu' | 'connecting' | 'playing' | 'dead';
+type GamePhase = 'menu' | 'connecting' | 'playing' | 'dead' | 'disconnected';
 
 declare global {
   interface Window {
@@ -51,6 +53,7 @@ export default function App() {
   const onConnected = useCallback(() => setPhase('playing'), []);
   const onDeath = useCallback(() => setPhase('dead'), []);
   const onKilled = useCallback((killerName: string) => setKilledBy(killerName), []);
+  const onConnectionLost = useCallback(() => setPhase('disconnected'), []);
 
   const network = useGameNetwork({
     sessionVersion,
@@ -61,6 +64,7 @@ export default function App() {
     onScoreChange: setScore,
     onDeath,
     onKilled,
+    onConnectionLost,
   });
 
   useEffect(() => {
@@ -239,22 +243,27 @@ export default function App() {
       const dt = Math.min((nowTime - lastRenderTime) / 1000, 0.1);
       lastRenderTime = nowTime;
 
-      // Exponential Easing Smoothing
-      const k = 16; // Easing factor (larger = faster catchup, lower latency)
-      const lerpRate = 1 - Math.exp(-k * dt);
-      // The local snake eases toward its (lag-free) predicted trail, so it can
-      // track tighter than remote snakes without reintroducing network jitter.
+      // The local snake eases toward its (lag-free) predicted trail; remote
+      // snakes use a render-delayed interpolation buffer (writeInterpolatedSnake).
       const selfLerpRate = 1 - Math.exp(-28 * dt);
 
       const prediction = network.predictionRef.current;
+      const interpBuffer = network.interpBufferRef.current;
+      const renderTime = nowTime - INTERP_DELAY_MS;
 
       for (const playerId in gameState.players) {
         const player = gameState.players[playerId];
         const isSelf =
           playerId === myId && prediction.initialized && prediction.segments.length > 0;
-        const targetSegments = isSelf ? prediction.segments : player.segments;
-        const rate = isSelf ? selfLerpRate : lerpRate;
 
+        if (!isSelf) {
+          // Remote snake: interpolate between buffered authoritative snapshots.
+          writeInterpolatedSnake(interpBuffer, playerId, renderTime, player);
+          continue;
+        }
+
+        // Local snake: ease the smoothed trail toward the prediction.
+        const targetSegments = prediction.segments;
         if (!player.smoothSegments || player.smoothSegments.length !== targetSegments.length) {
           if (player.smoothSegments && Math.abs(player.smoothSegments.length - targetSegments.length) <= 2) {
             if (player.smoothSegments.length < targetSegments.length) {
@@ -273,8 +282,8 @@ export default function App() {
           for (let i = 0; i < targetSegments.length; i++) {
             const target = targetSegments[i];
             const smooth = player.smoothSegments[i];
-            smooth.x += (target.x - smooth.x) * rate;
-            smooth.y += (target.y - smooth.y) * rate;
+            smooth.x += (target.x - smooth.x) * selfLerpRate;
+            smooth.y += (target.y - smooth.y) * selfLerpRate;
           }
         }
       }
@@ -361,6 +370,10 @@ export default function App() {
             onPlayAgain={startGame}
             onMainMenu={returnToMenu}
           />
+        )}
+
+        {phase === 'disconnected' && (
+          <ConnectionLostScreen onReconnect={startGame} onMainMenu={returnToMenu} />
         )}
       </div>
     </div>
