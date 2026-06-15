@@ -1,11 +1,20 @@
 type DeathScreenProps = {
   score: number;
   killedBy: string | null;
+  bestScore: number;
+  isNewBest: boolean;
   onPlayAgain: () => void;
   onMainMenu: () => void;
 };
 
-export function DeathScreen({ score, killedBy, onPlayAgain, onMainMenu }: DeathScreenProps) {
+export function DeathScreen({
+  score,
+  killedBy,
+  bestScore,
+  isNewBest,
+  onPlayAgain,
+  onMainMenu,
+}: DeathScreenProps) {
   return (
     <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/72 backdrop-blur-sm">
       <h2 className="mb-2 text-5xl font-bold text-red-500">Game Over</h2>
@@ -14,7 +23,10 @@ export function DeathScreen({ score, killedBy, onPlayAgain, onMainMenu }: DeathS
           Killed by {killedBy}
         </p>
       )}
-      <p className="mb-8 text-xl">Final Score: {score}</p>
+      <p className="mb-1 text-xl">Final Score: {score}</p>
+      <p className="mb-8 text-sm font-semibold text-amber-300">
+        {isNewBest ? '🏆 New personal best!' : `Best: ${bestScore}`}
+      </p>
       <div className="flex flex-wrap items-center justify-center gap-4">
         <button
           onClick={onPlayAgain}

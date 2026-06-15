@@ -17,6 +17,7 @@ import {
   INITIAL_SNAKE_LENGTH,
   TURN_SPEED,
   SEGMENT_DISTANCE,
+  SPAWN_PROTECTION_MS,
 } from './src/shared/constants.js';
 import { canSnakeBoost, getSnakeSpeed, rotateVelocityToward } from './src/shared/movement.js';
 
@@ -39,6 +40,10 @@ const FOOD_COUNT = 500;
 const FOOD_SPAWN_RATE = 10; // per second
 const SEGMENT_CELL_SIZE = 50;
 const FOOD_CELL_SIZE = 300;
+// Insert only every Nth body segment into the collision grid. Segments sit
+// ~SEGMENT_DISTANCE (6.67px) apart, so sampling by 2 leaves ~13.3px gaps — still
+// under the 15px collision radius, so a head can't slip between them.
+const SEGMENT_GRID_SAMPLE = 2;
 const AOI_RADIUS = 1200;
 const AOI_RADIUS_SQ = AOI_RADIUS * AOI_RADIUS;
 const TARGET_PLAYER_COUNT = 8;
@@ -60,8 +65,12 @@ const MAX_VIEWPORT_WIDTH = 2560;
 const MAX_VIEWPORT_HEIGHT = 1440;
 const DEFAULT_VIEWPORT = { width: 1280, height: 720 };
 const MAX_ACCUMULATED_TIME = 0.25;
-const SPAWN_PROTECTION_MS = 2500;
 const MAX_DEATH_FOOD = 100;
+// Gameplay hit radii (and their squared forms, to avoid sqrt in hot loops).
+const FOOD_PICKUP_RADIUS = 20;
+const FOOD_PICKUP_RADIUS_SQ = FOOD_PICKUP_RADIUS * FOOD_PICKUP_RADIUS;
+const SNAKE_COLLISION_RADIUS = 15;
+const SNAKE_COLLISION_RADIUS_SQ = SNAKE_COLLISION_RADIUS * SNAKE_COLLISION_RADIUS;
 const INPUT_RATE_LIMIT_MS = 16; // ~60/sec max (client sends at 30Hz)
 const VIEWPORT_RATE_LIMIT_MS = 200; // 5/sec max
 const BOT_NAMES = [
@@ -384,11 +393,10 @@ const updateBotAI = (player: ServerPlayer): void => {
   }
 
   // Seek nearest food
-  const nearby = foodGrid.query(head.x, head.y, BOT_FOOD_SEARCH_RADIUS);
   let bestFood: Food | null = null;
   let bestDistSq = Infinity;
-  for (const entry of nearby) {
-    if (!foods.has(entry.id)) continue;
+  foodGrid.queryEach(head.x, head.y, BOT_FOOD_SEARCH_RADIUS, (entry) => {
+    if (!foods.has(entry.id)) return;
     const dx = entry.food.position.x - head.x;
     const dy = entry.food.position.y - head.y;
     const distSq = dx * dx + dy * dy;
@@ -396,7 +404,7 @@ const updateBotAI = (player: ServerPlayer): void => {
       bestDistSq = distSq;
       bestFood = entry.food;
     }
-  }
+  });
 
   if (bestFood) {
     const dx = bestFood.position.x - head.x;
@@ -453,23 +461,31 @@ class SpatialGrid<T> {
     }
   }
 
-  query(x: number, y: number, radius: number): T[] {
+  // Visit every item in the queried neighborhood without allocating a result
+  // array. Return `true` from `visit` to stop early (e.g. first collision hit).
+  queryEach(x: number, y: number, radius: number, visit: (item: T) => boolean | void): void {
     const minCx = Math.floor((x - radius) / this.cellSize);
     const maxCx = Math.floor((x + radius) / this.cellSize);
     const minCy = Math.floor((y - radius) / this.cellSize);
     const maxCy = Math.floor((y + radius) / this.cellSize);
 
-    const result: T[] = [];
     for (let cx = minCx; cx <= maxCx; cx++) {
       for (let cy = minCy; cy <= maxCy; cy++) {
         const bucket = this.cells.get(this.key(cx, cy));
         if (bucket) {
           for (const item of bucket) {
-            result.push(item);
+            if (visit(item) === true) return;
           }
         }
       }
     }
+  }
+
+  query(x: number, y: number, radius: number): T[] {
+    const result: T[] = [];
+    this.queryEach(x, y, radius, (item) => {
+      result.push(item);
+    });
     return result;
   }
 }
@@ -548,7 +564,7 @@ const toWirePlayer = (p: ServerPlayer): Player => ({
 });
 
 type FoodEntry = { id: string; food: Food };
-type SegmentEntry = { playerId: string; segmentIndex: number; segment: Vector2 };
+type SegmentEntry = { playerId: string; segment: Vector2 };
 
 const foodGrid = new SpatialGrid<FoodEntry>(FOOD_CELL_SIZE);
 const segmentGrid = new SpatialGrid<SegmentEntry>(SEGMENT_CELL_SIZE);
@@ -664,6 +680,23 @@ const spawnFood = (count: number): Food[] => {
   return spawned;
 };
 
+// Convert a (dying or disconnecting) snake's body into food, capped so a long
+// snake can't flood the world. Pushes created food into `sink` (the death path
+// uses delta.newFoods; the disconnect path uses pendingNewFoods).
+const spawnDeathFood = (player: ServerPlayer, sink: Food[]): void => {
+  let spawned = 0;
+  for (let si = 0; si < player.segments.length && spawned < MAX_DEATH_FOOD; si += 2) {
+    const seg = player.segments.get(si);
+    const id = generateFoodId();
+    const newFood: Food = { id, position: { ...seg }, value: 3, hue: player.hue };
+    foods.set(id, newFood);
+    foodCount++;
+    foodGrid.insert(newFood.position.x, newFood.position.y, { id, food: newFood });
+    sink.push(newFood);
+    spawned++;
+  }
+};
+
 const createWorldSummary = (): WorldSummary => ({
   players: Array.from(players.values()).map((player) => ({
     id: player.id,
@@ -701,13 +734,6 @@ const serializeStateForPlayer = (playerId: string): GameState => {
     worldSize: WORLD_SIZE,
   };
 };
-
-// Convert Maps to Records for serialization (used only on init)
-const serializeState = (): GameState => ({
-  players: Object.fromEntries(Array.from(players, ([id, p]) => [id, toWirePlayer(p)])),
-  foods: Object.fromEntries(foods),
-  worldSize: WORLD_SIZE,
-});
 
 // Initial food
 spawnFood(FOOD_COUNT);
@@ -801,22 +827,7 @@ io.on('connection', (socket) => {
     // Spawn food from the disconnected player's body (same as death),
     // so players can't disconnect to deny food to nearby attackers.
     if (disconnectedPlayer && !disconnectedPlayer.isDead) {
-      let deathFoodSpawned = 0;
-      for (let si = 0; si < disconnectedPlayer.segments.length && deathFoodSpawned < MAX_DEATH_FOOD; si += 2) {
-        const seg = disconnectedPlayer.segments.get(si);
-        const id = generateFoodId();
-        const newFood: Food = {
-          id,
-          position: { ...seg },
-          value: 3,
-          hue: disconnectedPlayer.hue,
-        };
-        foods.set(id, newFood);
-        foodCount++;
-        foodGrid.insert(newFood.position.x, newFood.position.y, { id, food: newFood });
-        pendingNewFoods.push(newFood);
-        deathFoodSpawned++;
-      }
+      spawnDeathFood(disconnectedPlayer, pendingNewFoods);
     }
 
     if (disconnectedPlayer) {
@@ -840,6 +851,8 @@ let lastTime = Date.now();
 let accumulatedTime = 0;
 let foodGridAge = 0;
 const FOOD_GRID_REBUILD_INTERVAL = 30; // full rebuild every ~1 second
+let summaryAge = 0;
+const SUMMARY_INTERVAL = 10; // broadcast the world summary ~3x/sec, not every tick
 
 const stepGame = (dt: number, delta: DeltaUpdate) => {
   const tickNow = Date.now();
@@ -916,20 +929,17 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
     player.segments.pushFront(newHead);
 
     // Check food collision via spatial grid
-    const nearbyFoods = foodGrid.query(newHead.x, newHead.y, 20);
-    for (const entry of nearbyFoods) {
-      if (!foods.has(entry.id)) continue; // already eaten this tick
+    foodGrid.queryEach(newHead.x, newHead.y, FOOD_PICKUP_RADIUS, (entry) => {
+      if (!foods.has(entry.id)) return; // already eaten this tick
       const dx = newHead.x - entry.food.position.x;
       const dy = newHead.y - entry.food.position.y;
-      const distSq = dx * dx + dy * dy;
-
-      if (distSq < 400) {
+      if (dx * dx + dy * dy < FOOD_PICKUP_RADIUS_SQ) {
         player.score += entry.food.value;
         foods.delete(entry.id);
         foodCount--;
         delta.removedFoodIds.push(entry.id);
       }
-    }
+    });
 
     // Determine target length based on score
     const targetLength = INITIAL_SNAKE_LENGTH + Math.floor(player.score * 2);
@@ -974,13 +984,9 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
   for (const [pid, p] of players) {
     if (p.isDead || isPlayerSpawnProtected(pid, tickNow)) continue;
     const segLen = p.segments.length;
-    for (let i = 0; i < segLen; i++) {
+    for (let i = 0; i < segLen; i += SEGMENT_GRID_SAMPLE) {
       const seg = p.segments.get(i);
-      segmentGrid.insert(seg.x, seg.y, {
-        playerId: pid,
-        segmentIndex: i,
-        segment: seg,
-      });
+      segmentGrid.insert(seg.x, seg.y, { playerId: pid, segment: seg });
     }
   }
 
@@ -994,21 +1000,18 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
     if (isPlayerSpawnProtected(playerId, tickNow)) continue;
 
     const head = player.segments.get(0);
-    const nearbySegments = segmentGrid.query(head.x, head.y, 15);
-    for (const entry of nearbySegments) {
-      if (entry.playerId === playerId) continue;
+    segmentGrid.queryEach(head.x, head.y, SNAKE_COLLISION_RADIUS, (entry) => {
+      if (entry.playerId === playerId) return;
       const other = players.get(entry.playerId);
-      if (!other || other.isDead) continue;
+      if (!other || other.isDead) return;
 
       const dx = head.x - entry.segment.x;
       const dy = head.y - entry.segment.y;
-      const distSq = dx * dx + dy * dy;
-
-      if (distSq < 225) {
+      if (dx * dx + dy * dy < SNAKE_COLLISION_RADIUS_SQ) {
         pendingDeaths.push({ playerId, killerName: other.name || 'Unknown' });
-        break;
+        return true; // stop scanning — this snake is already doomed
       }
-    }
+    });
   }
 
   // ── Process deaths ────────────────────────────────────────────────
@@ -1029,22 +1032,7 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
     }
 
     // Spawn food where player died (capped to prevent food count explosions)
-    let deathFoodSpawned = 0;
-    for (let si = 0; si < player.segments.length && deathFoodSpawned < MAX_DEATH_FOOD; si += 2) {
-      const seg = player.segments.get(si);
-      const id = generateFoodId();
-      const newFood: Food = {
-        id,
-        position: { ...seg },
-        value: 3,
-        hue: player.hue,
-      };
-      foods.set(id, newFood);
-      foodCount++;
-      foodGrid.insert(newFood.position.x, newFood.position.y, { id, food: newFood });
-      delta.newFoods.push(newFood);
-      deathFoodSpawned++;
-    }
+    spawnDeathFood(player, delta.newFoods);
   }
 
   for (const id of deadPlayerIds) {
@@ -1154,11 +1142,10 @@ const emitDelta = (delta: DeltaUpdate) => {
       }
     }
 
-    const nearbyFoods = foodGrid.query(hx, hy, AOI_RADIUS);
-    for (const entry of nearbyFoods) {
-      if (!foods.has(entry.id)) continue; // skip stale food grid entries
+    foodGrid.queryEach(hx, hy, AOI_RADIUS, (entry) => {
+      if (!foods.has(entry.id)) return; // skip stale food grid entries
       enqueueFoodIfUnknown(entry.food);
-    }
+    });
 
     const outgoingRemovedPlayerIds = delta.removedPlayerIds.filter((playerId) => {
       if (!knownPlayerIds.has(playerId)) {
@@ -1214,7 +1201,6 @@ const emitDelta = (delta: DeltaUpdate) => {
       removedPlayerIds: outgoingRemovedPlayerIds,
       newFoods: outgoingNewFoods,
       removedFoodIds: outgoingRemovedFoodIds,
-      summary: delta.summary,
     });
   }
 };
@@ -1235,7 +1221,6 @@ const updateGame = () => {
     removedPlayerIds: [...pendingRemovedPlayerIds],
     newFoods: [...pendingNewFoods],
     removedFoodIds: [],
-    summary: { players: [], foodCount: 0, worldSize: WORLD_SIZE },
   };
 
   pendingNewPlayers = [];
@@ -1250,9 +1235,15 @@ const updateGame = () => {
     accumulatedTime = 0;
   }
 
-  delta.summary = createWorldSummary();
-
   emitDelta(delta);
+
+  // Broadcast the (non-AOI-culled) leaderboard/minimap summary a few times per
+  // second on its own channel instead of bloating every per-client delta.
+  summaryAge++;
+  if (summaryAge >= SUMMARY_INTERVAL) {
+    summaryAge = 0;
+    io.emit('summary', createWorldSummary());
+  }
 };
 
 setInterval(updateGame, 1000 / TICK_RATE);

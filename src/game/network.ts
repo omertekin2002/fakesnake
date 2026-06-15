@@ -11,6 +11,7 @@ import {
   getSnakePalette,
   SnakeAppearance,
 } from '../shared/skins';
+import { SPAWN_PROTECTION_MS } from '../shared/constants';
 import { DeathParticle, ScoreParticle } from './render/particles';
 import {
   createPredictionState,
@@ -125,7 +126,7 @@ export type UseGameNetworkOptions = {
   onScoreChange: (score: number) => void;
   onDeath: () => void;
   onKilled: (killerName: string) => void;
-  onConnectionLost: () => void;
+  onConnectionLost: (reason?: string) => void;
 };
 
 export type GameNetworkHandles = {
@@ -203,7 +204,15 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
       worldSummaryRef.current = data.summary;
       const me = data.state.players[data.id];
       if (me) {
-        seedPrediction(predictionRef.current, me.segments, me.velocity);
+        // Derive protection end from our own clock at spawn; slight skew vs the
+        // server's Date.now() window is safe (we err toward predicting no boost).
+        seedPrediction(
+          predictionRef.current,
+          me.segments,
+          me.velocity,
+          me.score,
+          performance.now() + SPAWN_PROTECTION_MS,
+        );
       }
       callbacksRef.current.onConnected();
     });
@@ -223,7 +232,6 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
       }
 
       applyDelta(localState, delta);
-      worldSummaryRef.current = delta.summary;
 
       // Re-base local prediction on the authoritative state for our own snake.
       if (myId) {
@@ -236,6 +244,7 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
             me.velocity,
             myUpdate.seq,
             me.score,
+            now,
           );
         }
       }
@@ -262,6 +271,11 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
       }
     });
 
+    // Leaderboard + minimap data on its own lower-frequency channel.
+    newSocket.on('summary', (data: WorldSummary) => {
+      worldSummaryRef.current = data;
+    });
+
     newSocket.on('killed', (data: { killerName: string }) => {
       callbacksRef.current.onKilled(data.killerName);
     });
@@ -273,9 +287,11 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
       if (socketRef.current === newSocket) socketRef.current = null;
       callbacksRef.current.onConnectionLost();
     });
-    newSocket.on('connect_error', () => {
+    newSocket.on('connect_error', (err: Error) => {
       if (intentionalDisconnectRef.current) return;
-      callbacksRef.current.onConnectionLost();
+      // A failed initial connect carries the server's rejection reason (e.g. the
+      // per-IP cap), which the UI uses to show "server full" vs a generic drop.
+      callbacksRef.current.onConnectionLost(err?.message);
     });
 
     return () => {

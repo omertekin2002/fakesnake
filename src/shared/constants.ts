@@ -12,3 +12,6 @@ export const TURN_SPEED = 5; // radians per second
 export const SEGMENT_DISTANCE = SNAKE_SPEED / TICK_RATE;
 export const BOOST_SPEED_MULTIPLIER = 2;
 export const BOOST_MIN_LENGTH = 10;
+// New snakes are invulnerable (and cannot boost) for this long after spawning.
+// Shared so client prediction can gate boost speed the same way the server does.
+export const SPAWN_PROTECTION_MS = 2500;

@@ -198,6 +198,19 @@ export const drawSnake = (
     const headRadius = 15.5;
     const headColor = mixColors(palette.primary, palette.stripe, 0.24);
 
+    // Boost cue: a glowing ring behind the head so the (score-draining) boost is
+    // visible. isBoosting reflects the server's *effective* boost state.
+    if (player.isBoosting) {
+      ctx.save();
+      ctx.shadowBlur = 18;
+      ctx.shadowColor = palette.stripe;
+      ctx.fillStyle = withAlpha(palette.stripe, 0.85);
+      ctx.beginPath();
+      ctx.arc(head.x, head.y, headRadius + 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
     drawSegmentCircle(ctx, head.x, head.y, headRadius, headColor, palette.highlight);
 
     ctx.save();

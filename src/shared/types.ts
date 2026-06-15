@@ -78,5 +78,7 @@ export interface DeltaUpdate {
   removedPlayerIds: string[];
   newFoods: Food[];
   removedFoodIds: string[];
-  summary: WorldSummary;
 }
+
+// The world summary (leaderboard + minimap) is not AOI-culled, so it rides its
+// own lower-frequency 'summary' event rather than every per-tick delta.

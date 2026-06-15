@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SEGMENT_DISTANCE } from '../shared/constants';
+import { FIXED_DT, SEGMENT_DISTANCE, SNAKE_SPEED } from '../shared/constants';
 import { Vector2 } from '../shared/types';
 import {
   createPredictionState,
@@ -7,6 +7,10 @@ import {
   reconcilePrediction,
   seedPrediction,
 } from './prediction';
+
+// A fixed "now" comfortably past protectedUntil=0, so tests are unprotected
+// unless they opt in by seeding a future protectedUntil.
+const NOW = 1000;
 
 // A straight snake of `len` segments, head at `head`, trailing along -dir.
 const makeSnake = (
@@ -29,11 +33,12 @@ const applyInputs = (
   segments: Vector2[],
   velocity: Vector2,
   count = INPUTS.length,
+  score = 0,
 ) => {
   const pred = createPredictionState();
-  seedPrediction(pred, segments, velocity);
+  seedPrediction(pred, segments, velocity, score, 0);
   for (let i = 0; i < count; i++) {
-    predictInput(pred, INPUTS[i].dir, INPUTS[i].boost, 0);
+    predictInput(pred, INPUTS[i].dir, INPUTS[i].boost, NOW);
   }
   return pred;
 };
@@ -43,7 +48,7 @@ describe('prediction state', () => {
     const pred = createPredictionState();
     expect(pred.initialized).toBe(false);
 
-    const seq = predictInput(pred, { x: 1, y: 0 }, false, 0);
+    const seq = predictInput(pred, { x: 1, y: 0 }, false, NOW);
     expect(seq).toBe(1); // sequence still advances so the server can ack it
     expect(pred.segments).toHaveLength(0);
     expect(pred.pending).toHaveLength(0);
@@ -53,7 +58,7 @@ describe('prediction state', () => {
     const segments = makeSnake(50);
     const velocity = { x: 1, y: 0 };
     const pred = createPredictionState();
-    seedPrediction(pred, segments, velocity);
+    seedPrediction(pred, segments, velocity, 0, 0);
 
     expect(pred.initialized).toBe(true);
     expect(pred.segments).not.toBe(segments);
@@ -64,11 +69,31 @@ describe('prediction state', () => {
 
   it('predictInput advances the head in the input direction', () => {
     const pred = createPredictionState();
-    seedPrediction(pred, makeSnake(50), { x: 1, y: 0 });
+    seedPrediction(pred, makeSnake(50), { x: 1, y: 0 }, 0, 0);
     const before = { ...pred.segments[0] };
-    predictInput(pred, { x: 1, y: 0 }, false, 0);
+    predictInput(pred, { x: 1, y: 0 }, false, NOW);
     expect(pred.segments[0].x).toBeGreaterThan(before.x);
     expect(pred.pending).toHaveLength(1);
+  });
+});
+
+describe('boost prediction (mirrors server)', () => {
+  it('drains predicted score and sheds tail while boosting', () => {
+    const pred = createPredictionState();
+    // score 5 -> target length 60; start at equilibrium length.
+    seedPrediction(pred, makeSnake(60), { x: 1, y: 0 }, 5, 0);
+    for (let i = 0; i < 3; i++) predictInput(pred, { x: 1, y: 0 }, true, NOW);
+    expect(pred.score).toBe(2); // -1 per boosting tick
+    expect(pred.segments.length).toBeLessThan(60); // tail shed while boosting
+  });
+
+  it('does not apply boost speed (or drain score) while spawn-protected', () => {
+    const pred = createPredictionState();
+    seedPrediction(pred, makeSnake(60), { x: 1, y: 0 }, 5, 1e9); // protected far ahead
+    const beforeX = pred.segments[0].x;
+    predictInput(pred, { x: 1, y: 0 }, true, NOW); // NOW < protectedUntil → protected
+    expect(pred.score).toBe(5); // no drain while protected
+    expect(pred.segments[0].x - beforeX).toBeCloseTo(SNAKE_SPEED * FIXED_DT, 6); // 1x speed
   });
 });
 
@@ -93,13 +118,7 @@ describe('reconciliation', () => {
 
     // Client predicted the whole stream, then reconciles against the server.
     const reconciled = applyInputs(seedSegments, seedVelocity);
-    reconcilePrediction(
-      reconciled,
-      server.segments,
-      server.velocity,
-      ACK,
-      0,
-    );
+    reconcilePrediction(reconciled, server.segments, server.velocity, ACK, 0, NOW);
 
     // Acked inputs dropped; the rest replayed onto the authoritative base.
     expect(reconciled.pending.every((p) => p.seq > ACK)).toBe(true);
@@ -116,13 +135,7 @@ describe('reconciliation', () => {
   it('drops every pending input once the server catches up', () => {
     const reconciled = applyInputs(makeSnake(50), { x: 1, y: 0 });
     const server = applyInputs(makeSnake(50), { x: 1, y: 0 });
-    reconcilePrediction(
-      reconciled,
-      server.segments,
-      server.velocity,
-      INPUTS.length,
-      0,
-    );
+    reconcilePrediction(reconciled, server.segments, server.velocity, INPUTS.length, 0, NOW);
     expect(reconciled.pending).toHaveLength(0);
   });
 });
