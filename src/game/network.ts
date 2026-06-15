@@ -12,6 +12,12 @@ import {
   SnakeAppearance,
 } from '../shared/skins';
 import { DeathParticle, ScoreParticle } from './render/particles';
+import {
+  createPredictionState,
+  PredictionState,
+  reconcilePrediction,
+  seedPrediction,
+} from './prediction';
 
 export const applyDelta = (localState: GameState, delta: DeltaUpdate): void => {
   for (const player of delta.newPlayers) {
@@ -122,6 +128,7 @@ export type GameNetworkHandles = {
   myIdRef: MutableRefObject<string | null>;
   scoreParticlesRef: MutableRefObject<ScoreParticle[]>;
   deathParticlesRef: MutableRefObject<DeathParticle[]>;
+  predictionRef: MutableRefObject<PredictionState>;
   resetGameRefs: () => void;
   disconnect: () => void;
 };
@@ -150,6 +157,7 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
   const myIdRef = useRef<string | null>(null);
   const scoreParticlesRef = useRef<ScoreParticle[]>([]);
   const deathParticlesRef = useRef<DeathParticle[]>([]);
+  const predictionRef = useRef<PredictionState>(createPredictionState());
 
   const callbacksRef = useRef({ onConnected, onScoreChange, onDeath, onKilled });
   useEffect(() => {
@@ -174,6 +182,10 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
       myIdRef.current = data.id;
       gameStateRef.current = data.state;
       worldSummaryRef.current = data.summary;
+      const me = data.state.players[data.id];
+      if (me) {
+        seedPrediction(predictionRef.current, me.segments, me.velocity);
+      }
       callbacksRef.current.onConnected();
     });
 
@@ -193,6 +205,21 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
 
       applyDelta(localState, delta);
       worldSummaryRef.current = delta.summary;
+
+      // Re-base local prediction on the authoritative state for our own snake.
+      if (myId) {
+        const me = localState.players[myId];
+        const myUpdate = delta.playerUpdates[myId];
+        if (me && myUpdate && typeof myUpdate.seq === 'number') {
+          reconcilePrediction(
+            predictionRef.current,
+            me.segments,
+            me.velocity,
+            myUpdate.seq,
+            me.score,
+          );
+        }
+      }
 
       if (myId && localState.players[myId]) {
         callbacksRef.current.onScoreChange(localState.players[myId].score);
@@ -223,6 +250,7 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
     myIdRef.current = null;
     scoreParticlesRef.current = [];
     deathParticlesRef.current = [];
+    predictionRef.current = createPredictionState();
   }, []);
 
   const disconnect = useCallback(() => {
@@ -230,6 +258,7 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
     socketRef.current = null;
     gameStateRef.current = null;
     myIdRef.current = null;
+    predictionRef.current = createPredictionState();
   }, []);
 
   return useMemo(() => ({
@@ -239,6 +268,7 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
     myIdRef,
     scoreParticlesRef,
     deathParticlesRef,
+    predictionRef,
     resetGameRefs,
     disconnect,
   }), [disconnect, resetGameRefs]);

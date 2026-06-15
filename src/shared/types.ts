@@ -53,7 +53,12 @@ export interface InitPayload {
 }
 
 export interface ClientInput {
-  targetDirection: Vector2;
+  x: number;
+  y: number;
+  boost: boolean;
+  // Monotonic per-client input sequence number. The server echoes the latest
+  // applied seq back in PlayerTickUpdate so the client can reconcile prediction.
+  seq: number;
 }
 
 export interface PlayerTickUpdate {
@@ -62,6 +67,9 @@ export interface PlayerTickUpdate {
   score: number;
   velocity: Vector2;
   isBoosting: boolean;
+  // The last input seq the server had applied for this player as of this tick.
+  // Only meaningful to the owning client (used for prediction reconciliation).
+  seq?: number;
 }
 
 export interface DeltaUpdate {

@@ -100,6 +100,7 @@ export const drawSnake = (
   ctx: CanvasRenderingContext2D,
   player: Player,
   camera: Camera,
+  velocityOverride?: Vector2,
 ) => {
   const skin = player.appearance ?? DEFAULT_SNAKE_APPEARANCE;
   const palette = getSnakePalette(skin.paletteId);
@@ -118,7 +119,8 @@ export const drawSnake = (
   }
 
   if (isInViewport(head.x, head.y, camera, 30)) {
-    const angle = Math.atan2(player.velocity.y, player.velocity.x);
+    const velocity = velocityOverride ?? player.velocity;
+    const angle = Math.atan2(velocity.y, velocity.x);
     const fx = Math.cos(angle);
     const fy = Math.sin(angle);
     const px = -fy;

@@ -10,23 +10,27 @@ import {
   getSnakePalette,
   normalizeSnakeAppearance,
 } from './src/shared/skins.js';
+import {
+  TICK_RATE,
+  FIXED_DT,
+  WORLD_SIZE,
+  INITIAL_SNAKE_LENGTH,
+  TURN_SPEED,
+  SEGMENT_DISTANCE,
+} from './src/shared/constants.js';
+import { canSnakeBoost, getSnakeSpeed, rotateVelocityToward } from './src/shared/movement.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DIST_DIR = path.join(__dirname, 'dist');
 const PORT = Number(process.env.PORT) || 3000;
-const TICK_RATE = 30; // 30 updates per second
-const WORLD_SIZE = 3000;
-const INITIAL_SNAKE_LENGTH = 50;
-const SNAKE_SPEED = 200; // pixels per second
-const TURN_SPEED = 5; // radians per second
+// Physics constants (TICK_RATE, WORLD_SIZE, SNAKE_SPEED, TURN_SPEED,
+// SEGMENT_DISTANCE, BOOST_*, INITIAL_SNAKE_LENGTH, FIXED_DT) now live in
+// src/shared/constants.ts so the client prediction stays in lock-step.
 const FOOD_COUNT = 500;
 const FOOD_SPAWN_RATE = 10; // per second
-const SEGMENT_DISTANCE = 200 / 30; // SNAKE_SPEED / TICK_RATE
 const SEGMENT_CELL_SIZE = 50;
 const FOOD_CELL_SIZE = 300;
-const BOOST_SPEED_MULTIPLIER = 2;
-const BOOST_MIN_LENGTH = 10;
 const AOI_RADIUS = 1200;
 const AOI_RADIUS_SQ = AOI_RADIUS * AOI_RADIUS;
 const TARGET_PLAYER_COUNT = 8;
@@ -47,7 +51,6 @@ const MIN_VIEWPORT_HEIGHT = 240;
 const MAX_VIEWPORT_WIDTH = 2560;
 const MAX_VIEWPORT_HEIGHT = 1440;
 const DEFAULT_VIEWPORT = { width: 1280, height: 720 };
-const FIXED_DT = 1 / TICK_RATE;
 const MAX_ACCUMULATED_TIME = 0.25;
 const SPAWN_PROTECTION_MS = 2500;
 const MAX_DEATH_FOOD = 100;
@@ -557,6 +560,9 @@ const playerViewports = new Map<string, ViewportSize>();
 const knownPlayerIdsBySocket = new Map<string, Set<string>>();
 const knownFoodIdsBySocket = new Map<string, Set<string>>();
 const spawnProtectionUntilByPlayerId = new Map<string, number>();
+// Latest input sequence number applied per player; echoed back so the owning
+// client can reconcile its prediction against the authoritative state.
+const lastInputSeqByPlayer = new Map<string, number>();
 
 let foodIdCounter = 0;
 let foodCount = 0; // O(1) counter instead of foods.size each tick
@@ -699,7 +705,7 @@ io.on('connection', (socket) => {
     const player = players.get(socket.id);
     if (player && !player.isDead) {
       if (data && typeof data === 'object') {
-        const input = data as { x?: unknown; y?: unknown; boost?: unknown };
+        const input = data as { x?: unknown; y?: unknown; boost?: unknown; seq?: unknown };
         const x = Number(input.x);
         const y = Number(input.y);
 
@@ -718,6 +724,11 @@ io.on('connection', (socket) => {
         }
 
         player.isBoosting = input.boost === true;
+
+        const seq = Number(input.seq);
+        if (Number.isFinite(seq)) {
+          lastInputSeqByPlayer.set(socket.id, seq);
+        }
       } else {
         player.isBoosting = false;
       }
@@ -765,6 +776,7 @@ io.on('connection', (socket) => {
     knownPlayerIdsBySocket.delete(socket.id);
     knownFoodIdsBySocket.delete(socket.id);
     spawnProtectionUntilByPlayerId.delete(socket.id);
+    lastInputSeqByPlayer.delete(socket.id);
   });
 });
 
@@ -831,28 +843,12 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
     if (player.isDead) continue;
     const isProtected = isPlayerSpawnProtected(playerId, tickNow);
 
-    // Smoothly rotate velocity towards targetDirection
-    const currentAngle = Math.atan2(player.velocity.y, player.velocity.x);
-    const targetAngle = Math.atan2(player.targetDirection.y, player.targetDirection.x);
-
-    let angleDiff = targetAngle - currentAngle;
-    while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
-    while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
-
-    const maxTurn = TURN_SPEED * dt;
-    if (Math.abs(angleDiff) <= maxTurn) {
-      player.velocity = { ...player.targetDirection };
-    } else {
-      const newAngle = currentAngle + Math.sign(angleDiff) * maxTurn;
-      player.velocity = {
-        x: Math.cos(newAngle),
-        y: Math.sin(newAngle),
-      };
-    }
+    // Smoothly rotate velocity towards targetDirection (shared with client prediction)
+    player.velocity = rotateVelocityToward(player.velocity, player.targetDirection, TURN_SPEED * dt);
 
     const head = player.segments.get(0);
-    const canBoost = !isProtected && player.isBoosting && player.segments.length > BOOST_MIN_LENGTH;
-    const speed = canBoost ? SNAKE_SPEED * BOOST_SPEED_MULTIPLIER : SNAKE_SPEED;
+    const canBoost = !isProtected && canSnakeBoost(player.isBoosting, player.segments.length);
+    const speed = getSnakeSpeed(canBoost);
 
     const newHead = {
       x: head.x + player.velocity.x * speed * dt,
@@ -917,6 +913,7 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
       score: player.score,
       velocity: { ...player.velocity },
       isBoosting: canBoost,
+      seq: lastInputSeqByPlayer.get(playerId) ?? 0,
     };
   }
 
@@ -1001,6 +998,7 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
   for (const id of deadPlayerIds) {
     players.delete(id);
     spawnProtectionUntilByPlayerId.delete(id);
+    lastInputSeqByPlayer.delete(id);
   }
 };
 

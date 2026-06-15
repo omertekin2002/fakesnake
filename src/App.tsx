@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { DEFAULT_SNAKE_APPEARANCE, SnakeAppearance } from './shared/skins';
 import { useGameNetwork } from './game/network';
+import { predictInput } from './game/prediction';
 import { drawGrid, drawWorldBorder } from './game/render/grid';
 import { drawFoods, pruneDistantFoods } from './game/render/food';
 import { drawSnake } from './game/render/snake';
@@ -18,7 +19,6 @@ import { ConnectingOverlay } from './components/ConnectingOverlay';
 import { DeathScreen } from './components/DeathScreen';
 import { ExitButton } from './components/ExitButton';
 
-const INPUT_THROTTLE_MS = 1000 / 30;
 const TICK_MS = 1000 / 30;
 const FOOD_PRUNE_INTERVAL = 2000;
 const FOOD_PRUNE_MARGIN = 1400;
@@ -124,62 +124,61 @@ export default function App() {
       return;
     }
 
-    let lastEmitTime = 0;
     const mousePos = { x: 0, y: 0 };
+    // Seed heading from the current prediction so an idle mouse keeps us moving
+    // straight (the server likewise keeps the last targetDirection).
+    const lastDir = { ...network.predictionRef.current.velocity };
     let boosting = false;
-
-    const emitInput = () => {
-      network.socketRef.current?.emit('input', {
-        x: mousePos.x,
-        y: mousePos.y,
-        boost: boosting,
-      });
-    };
 
     const handleMouseMove = (e: MouseEvent) => {
       if (!canvasRef.current) return;
       const rect = canvasRef.current.getBoundingClientRect();
       mousePos.x = e.clientX - rect.left - windowSize.width / 2;
       mousePos.y = e.clientY - rect.top - windowSize.height / 2;
-
-      const now = performance.now();
-      if (now - lastEmitTime < INPUT_THROTTLE_MS) return;
-      lastEmitTime = now;
-      emitInput();
     };
 
     const handleMouseDown = (e: MouseEvent) => {
-      if (e.button === 0) {
-        boosting = true;
-        emitInput();
-      }
+      if (e.button === 0) boosting = true;
     };
     const handleMouseUp = (e: MouseEvent) => {
-      if (e.button === 0) {
-        boosting = false;
-        emitInput();
-      }
+      if (e.button === 0) boosting = false;
     };
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.code === 'Space' && !e.repeat) {
         e.preventDefault();
         boosting = true;
-        emitInput();
       }
     };
     const handleKeyUp = (e: KeyboardEvent) => {
-      if (e.code === 'Space') {
-        boosting = false;
-        emitInput();
-      }
+      if (e.code === 'Space') boosting = false;
     };
 
+    // Fixed-rate prediction tick: advance the local snake immediately from input
+    // and send that input (tagged with a seq) for the server to acknowledge.
+    const tickInput = () => {
+      const socket = network.socketRef.current;
+      const myId = network.myIdRef.current;
+      if (!socket || !myId) return;
+
+      const len = Math.hypot(mousePos.x, mousePos.y);
+      if (len > 0) {
+        lastDir.x = mousePos.x / len;
+        lastDir.y = mousePos.y / len;
+      }
+
+      const score = network.gameStateRef.current?.players[myId]?.score ?? 0;
+      const seq = predictInput(network.predictionRef.current, lastDir, boosting, score);
+      socket.emit('input', { x: lastDir.x, y: lastDir.y, boost: boosting, seq });
+    };
+
+    const intervalId = window.setInterval(tickInput, TICK_MS);
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mousedown', handleMouseDown);
     window.addEventListener('mouseup', handleMouseUp);
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
     return () => {
+      window.clearInterval(intervalId);
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mousedown', handleMouseDown);
       window.removeEventListener('mouseup', handleMouseUp);
@@ -243,30 +242,39 @@ export default function App() {
       // Exponential Easing Smoothing
       const k = 16; // Easing factor (larger = faster catchup, lower latency)
       const lerpRate = 1 - Math.exp(-k * dt);
+      // The local snake eases toward its (lag-free) predicted trail, so it can
+      // track tighter than remote snakes without reintroducing network jitter.
+      const selfLerpRate = 1 - Math.exp(-28 * dt);
+
+      const prediction = network.predictionRef.current;
 
       for (const playerId in gameState.players) {
         const player = gameState.players[playerId];
+        const isSelf =
+          playerId === myId && prediction.initialized && prediction.segments.length > 0;
+        const targetSegments = isSelf ? prediction.segments : player.segments;
+        const rate = isSelf ? selfLerpRate : lerpRate;
 
-        if (!player.smoothSegments || player.smoothSegments.length !== player.segments.length) {
-          if (player.smoothSegments && Math.abs(player.smoothSegments.length - player.segments.length) <= 2) {
-            if (player.smoothSegments.length < player.segments.length) {
-              while (player.smoothSegments.length < player.segments.length) {
-                player.smoothSegments.unshift({ ...player.segments[0] });
+        if (!player.smoothSegments || player.smoothSegments.length !== targetSegments.length) {
+          if (player.smoothSegments && Math.abs(player.smoothSegments.length - targetSegments.length) <= 2) {
+            if (player.smoothSegments.length < targetSegments.length) {
+              while (player.smoothSegments.length < targetSegments.length) {
+                player.smoothSegments.unshift({ ...targetSegments[0] });
               }
             } else {
-              while (player.smoothSegments.length > player.segments.length) {
+              while (player.smoothSegments.length > targetSegments.length) {
                 player.smoothSegments.pop();
               }
             }
           } else {
-            player.smoothSegments = player.segments.map((seg) => ({ ...seg }));
+            player.smoothSegments = targetSegments.map((seg) => ({ ...seg }));
           }
         } else {
-          for (let i = 0; i < player.segments.length; i++) {
-            const target = player.segments[i];
+          for (let i = 0; i < targetSegments.length; i++) {
+            const target = targetSegments[i];
             const smooth = player.smoothSegments[i];
-            smooth.x += (target.x - smooth.x) * lerpRate;
-            smooth.y += (target.y - smooth.y) * lerpRate;
+            smooth.x += (target.x - smooth.x) * rate;
+            smooth.y += (target.y - smooth.y) * rate;
           }
         }
       }
@@ -293,7 +301,9 @@ export default function App() {
 
       for (const playerId in gameState.players) {
         const player = gameState.players[playerId];
-        drawSnake(ctx, player, camera);
+        const headVelocity =
+          playerId === myId && prediction.initialized ? prediction.velocity : undefined;
+        drawSnake(ctx, player, camera, headVelocity);
       }
 
       const now = performance.now();
