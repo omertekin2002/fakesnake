@@ -52,7 +52,23 @@ export const renderMenuScene = (
     );
   }
 
-  const vignette = ctx.createRadialGradient(
+  ctx.fillStyle = getVignette(ctx, width, height);
+  ctx.fillRect(0, 0, width, height);
+}
+
+// The vignette only depends on the viewport size; rebuild it on resize instead
+// of allocating a gradient every frame.
+let vignetteCache: { width: number; height: number; gradient: CanvasGradient } | null = null;
+
+const getVignette = (
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+): CanvasGradient => {
+  if (vignetteCache && vignetteCache.width === width && vignetteCache.height === height) {
+    return vignetteCache.gradient;
+  }
+  const gradient = ctx.createRadialGradient(
     width / 2,
     height / 2,
     Math.min(width, height) * 0.15,
@@ -60,8 +76,8 @@ export const renderMenuScene = (
     height / 2,
     Math.max(width, height) * 0.7,
   );
-  vignette.addColorStop(0, 'rgba(0, 0, 0, 0)');
-  vignette.addColorStop(1, 'rgba(0, 0, 0, 0.42)');
-  ctx.fillStyle = vignette;
-  ctx.fillRect(0, 0, width, height);
+  gradient.addColorStop(0, 'rgba(0, 0, 0, 0)');
+  gradient.addColorStop(1, 'rgba(0, 0, 0, 0.42)');
+  vignetteCache = { width, height, gradient };
+  return gradient;
 };

@@ -1,5 +1,4 @@
 import express from 'express';
-import { createServer as createViteServer } from 'vite';
 import { createServer } from 'http';
 import { Server, Socket } from 'socket.io';
 import path from 'path';
@@ -19,7 +18,12 @@ import {
   SEGMENT_DISTANCE,
   SPAWN_PROTECTION_MS,
 } from './src/shared/constants.js';
-import { canSnakeBoost, getSnakeSpeed, rotateVelocityToward } from './src/shared/movement.js';
+import {
+  canSnakeBoost,
+  getSnakeSpeed,
+  getTargetLength,
+  rotateVelocityToward,
+} from './src/shared/movement.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -29,6 +33,9 @@ const PORT = Number(process.env.PORT) || 3000;
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN ?? '*';
 // Max simultaneous socket connections from a single IP (anti-abuse).
 const MAX_CONNECTIONS_PER_IP = Number(process.env.MAX_CONNECTIONS_PER_IP) || 8;
+// Global ceiling across all IPs, so a botnet of distinct addresses can't
+// exhaust the server either (each connection costs spawn work + tick fanout).
+const MAX_TOTAL_CONNECTIONS = Number(process.env.MAX_TOTAL_CONNECTIONS) || 64;
 // Only trust the X-Forwarded-For header when explicitly behind a proxy that
 // sets it (e.g. Render). Off by default so a directly-exposed server can't be
 // tricked by a spoofed XFF into bypassing the per-IP connection cap.
@@ -585,6 +592,7 @@ const io = new Server(httpServer, {
 // Reject excess simultaneous connections from a single address so a client
 // can't spawn unlimited snakes or exhaust the server.
 const connectionsByIp = new Map<string, number>();
+let totalConnections = 0;
 
 const getClientIp = (socket: Socket): string => {
   if (TRUST_PROXY) {
@@ -610,6 +618,10 @@ const releaseIp = (ip: string): void => {
 };
 
 io.use((socket, next) => {
+  if (totalConnections >= MAX_TOTAL_CONNECTIONS) {
+    next(new Error('Server is full'));
+    return;
+  }
   const ip = getClientIp(socket);
   const count = connectionsByIp.get(ip) ?? 0;
   if (count >= MAX_CONNECTIONS_PER_IP) {
@@ -617,6 +629,7 @@ io.use((socket, next) => {
     return;
   }
   connectionsByIp.set(ip, count + 1);
+  totalConnections++;
   next();
 });
 
@@ -840,6 +853,7 @@ io.on('connection', (socket) => {
     spawnProtectionUntilByPlayerId.delete(socket.id);
     lastInputSeqByPlayer.delete(socket.id);
     releaseIp(getClientIp(socket));
+    totalConnections--;
   });
 });
 
@@ -941,8 +955,8 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
       }
     });
 
-    // Determine target length based on score
-    const targetLength = INITIAL_SNAKE_LENGTH + Math.floor(player.score * 2);
+    // Determine target length based on score (shared with client prediction)
+    const targetLength = getTargetLength(player.score);
 
     let tailsRemoved = 0;
     if (player.segments.length > targetLength) {
@@ -1025,7 +1039,6 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
     delta.removedPlayerIds.push(playerId);
     deadPlayerIds.push(playerId);
     delete delta.playerUpdates[playerId];
-    spawnProtectionUntilByPlayerId.delete(playerId);
 
     if (!isBot(playerId)) {
       io.to(playerId).emit('killed', { killerName });
@@ -1042,6 +1055,22 @@ const stepGame = (dt: number, delta: DeltaUpdate) => {
   }
 };
 
+// The AOI food re-scan and exit-purge are the most expensive part of emitDelta
+// (hundreds of grid/known-set checks per socket per tick), but food is only
+// ever revealed/purged near the AOI edge — ~560px beyond the viewport — so
+// running them every Nth tick per socket (staggered) is invisible to players.
+// Eaten food, newly spawned food, and all player bookkeeping stay per-tick.
+const FOOD_AOI_SCAN_INTERVAL = 3;
+let emitTickCounter = 0;
+
+const socketScanOffset = (socketId: string): number => {
+  let hash = 0;
+  for (let i = 0; i < socketId.length; i++) {
+    hash = (hash * 31 + socketId.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash) % FOOD_AOI_SCAN_INTERVAL;
+};
+
 const emitDelta = (delta: DeltaUpdate) => {
   if (
     Object.keys(delta.playerUpdates).length === 0 &&
@@ -1053,23 +1082,52 @@ const emitDelta = (delta: DeltaUpdate) => {
     return;
   }
 
+  emitTickCounter++;
+
   // ── Per-client viewport-culled deltas ───────────────────────────────
   for (const [socketId, socket] of io.sockets.sockets) {
     const player = players.get(socketId);
-    const knownPlayerIds = knownPlayerIdsBySocket.get(socketId) ?? new Set<string>();
-    const knownFoodIds = knownFoodIdsBySocket.get(socketId) ?? new Set<string>();
-    knownPlayerIdsBySocket.set(socketId, knownPlayerIds);
-    knownFoodIdsBySocket.set(socketId, knownFoodIds);
+    let knownPlayerIds = knownPlayerIdsBySocket.get(socketId);
+    if (!knownPlayerIds) {
+      knownPlayerIds = new Set();
+      knownPlayerIdsBySocket.set(socketId, knownPlayerIds);
+    }
+    let knownFoodIds = knownFoodIdsBySocket.get(socketId);
+    if (!knownFoodIds) {
+      knownFoodIds = new Set();
+      knownFoodIdsBySocket.set(socketId, knownFoodIds);
+    }
 
     if (!player) {
-      // Dead or transitional — send full delta so client detects death
-      for (const playerId of delta.newPlayers.map((entry) => entry.id)) knownPlayerIds.add(playerId);
-      for (const food of delta.newFoods) knownFoodIds.add(food.id);
-      for (const playerId of delta.removedPlayerIds) knownPlayerIds.delete(playerId);
-      for (const foodId of delta.removedFoodIds) knownFoodIds.delete(foodId);
-      socket.emit('delta', delta);
+      // Dead or transitional — the client only needs removals now (its own id
+      // in removedPlayerIds is how it detects death). Withholding the rest of
+      // the world both saves bandwidth and stops a lingering socket from
+      // spectating the full game state.
+      const removedPlayerIdsForSocket = delta.removedPlayerIds.filter((playerId) => {
+        if (!knownPlayerIds.has(playerId)) return false;
+        knownPlayerIds.delete(playerId);
+        return true;
+      });
+      const removedFoodIdsForSocket = delta.removedFoodIds.filter((foodId) => {
+        if (!knownFoodIds.has(foodId)) return false;
+        knownFoodIds.delete(foodId);
+        return true;
+      });
+      if (removedPlayerIdsForSocket.length > 0 || removedFoodIdsForSocket.length > 0) {
+        socket.emit('delta', {
+          playerUpdates: {},
+          newPlayers: [],
+          removedPlayerIds: removedPlayerIdsForSocket,
+          despawnedPlayerIds: [],
+          newFoods: [],
+          removedFoodIds: removedFoodIdsForSocket,
+        });
+      }
       continue;
     }
+
+    const scanFoodThisTick =
+      (emitTickCounter + socketScanOffset(socketId)) % FOOD_AOI_SCAN_INTERVAL === 0;
 
     const hx = player.segments.get(0).x;
     const hy = player.segments.get(0).y;
@@ -1088,7 +1146,7 @@ const emitDelta = (delta: DeltaUpdate) => {
     };
 
     // Filter playerUpdates by AOI (always include own update)
-    let filteredUpdates: DeltaUpdate['playerUpdates'] = {};
+    const filteredUpdates: DeltaUpdate['playerUpdates'] = {};
     const updateKeys = Object.keys(delta.playerUpdates);
     for (const pid of updateKeys) {
       if (pid === socketId) {
@@ -1142,10 +1200,12 @@ const emitDelta = (delta: DeltaUpdate) => {
       }
     }
 
-    foodGrid.queryEach(hx, hy, AOI_RADIUS, (entry) => {
-      if (!foods.has(entry.id)) return; // skip stale food grid entries
-      enqueueFoodIfUnknown(entry.food);
-    });
+    if (scanFoodThisTick) {
+      foodGrid.queryEach(hx, hy, AOI_RADIUS, (entry) => {
+        if (!foods.has(entry.id)) return; // skip stale food grid entries
+        enqueueFoodIfUnknown(entry.food);
+      });
+    }
 
     const outgoingRemovedPlayerIds = delta.removedPlayerIds.filter((playerId) => {
       if (!knownPlayerIds.has(playerId)) {
@@ -1158,6 +1218,9 @@ const emitDelta = (delta: DeltaUpdate) => {
     // Purge known players that have left this client's AOI.  They still
     // exist in the game but are no longer close enough to be visible.
     // Without this, they freeze in place as ghost snakes on the client.
+    // These ride their own channel (despawnedPlayerIds) so the client can
+    // silently drop them instead of playing a death explosion.
+    const outgoingDespawnedPlayerIds: string[] = [];
     for (const knownId of knownPlayerIds) {
       if (knownId === socketId) continue;           // never purge self
       if (seenNewPlayerIds.has(knownId)) continue;   // just entered AOI this tick
@@ -1168,7 +1231,7 @@ const emitDelta = (delta: DeltaUpdate) => {
         continue;
       }
       if (!isWithinAoi(origin, knownPlayer.segments.get(0))) {
-        outgoingRemovedPlayerIds.push(knownId);
+        outgoingDespawnedPlayerIds.push(knownId);
         knownPlayerIds.delete(knownId);
       }
     }
@@ -1183,15 +1246,17 @@ const emitDelta = (delta: DeltaUpdate) => {
 
     // Keep server-side AOI tracking aligned with what the client should retain.
     // Otherwise a locally-pruned food can remain marked as known and never be sent again.
-    for (const knownFoodId of knownFoodIds) {
-      const knownFood = foods.get(knownFoodId);
-      if (!knownFood) {
-        knownFoodIds.delete(knownFoodId);
-        continue;
-      }
-      if (!isWithinAoi(origin, knownFood.position)) {
-        outgoingRemovedFoodIds.push(knownFoodId);
-        knownFoodIds.delete(knownFoodId);
+    if (scanFoodThisTick) {
+      for (const knownFoodId of knownFoodIds) {
+        const knownFood = foods.get(knownFoodId);
+        if (!knownFood) {
+          knownFoodIds.delete(knownFoodId);
+          continue;
+        }
+        if (!isWithinAoi(origin, knownFood.position)) {
+          outgoingRemovedFoodIds.push(knownFoodId);
+          knownFoodIds.delete(knownFoodId);
+        }
       }
     }
 
@@ -1199,6 +1264,7 @@ const emitDelta = (delta: DeltaUpdate) => {
       playerUpdates: filteredUpdates,
       newPlayers: outgoingNewPlayers,
       removedPlayerIds: outgoingRemovedPlayerIds,
+      despawnedPlayerIds: outgoingDespawnedPlayerIds,
       newFoods: outgoingNewFoods,
       removedFoodIds: outgoingRemovedFoodIds,
     });
@@ -1219,6 +1285,7 @@ const updateGame = () => {
     playerUpdates: {},
     newPlayers: pendingNewPlayers.map(toWirePlayer),
     removedPlayerIds: [...pendingRemovedPlayerIds],
+    despawnedPlayerIds: [], // AOI exits are per-socket; filled in emitDelta
     newFoods: [...pendingNewFoods],
     removedFoodIds: [],
   };
@@ -1229,10 +1296,13 @@ const updateGame = () => {
 
   stepGame(FIXED_DT, delta);
   accumulatedTime -= FIXED_DT;
-  // Cap so we never run more than one tick per delta — multiple ticks would
-  // overwrite playerUpdates and desync client-side snake lengths.
+  // We never run more than one tick per delta — multiple ticks would overwrite
+  // playerUpdates and desync client-side snake lengths. Instead of discarding
+  // surplus time (which made the sim run slow under timer jitter), keep exactly
+  // one tick of debt so the next interval callback steps immediately and the
+  // simulation catches back up to real time.
   if (accumulatedTime > FIXED_DT) {
-    accumulatedTime = 0;
+    accumulatedTime = FIXED_DT;
   }
 
   emitDelta(delta);
@@ -1254,6 +1324,9 @@ async function startServer() {
   });
 
   if (process.env.NODE_ENV !== 'production') {
+    // Vite only exists for the dev middleware; import it lazily so the
+    // production server doesn't load the entire bundler at startup.
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -1271,4 +1344,7 @@ async function startServer() {
   });
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
+});

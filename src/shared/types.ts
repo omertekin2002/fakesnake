@@ -75,7 +75,12 @@ export interface PlayerTickUpdate {
 export interface DeltaUpdate {
   playerUpdates: Record<string, PlayerTickUpdate>;
   newPlayers: Player[];
+  // Players who died (or disconnected). The client drops them AND plays the
+  // death effect. A client's own id appearing here is how it learns it died.
   removedPlayerIds: string[];
+  // Players who merely left this client's AOI — still alive, just out of
+  // sight. The client drops them silently (no death explosion).
+  despawnedPlayerIds: string[];
   newFoods: Food[];
   removedFoodIds: string[];
 }

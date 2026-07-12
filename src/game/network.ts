@@ -11,7 +11,7 @@ import {
   getSnakePalette,
   SnakeAppearance,
 } from '../shared/skins';
-import { SPAWN_PROTECTION_MS } from '../shared/constants';
+import { SPAWN_PROTECTION_MS, WORLD_SIZE } from '../shared/constants';
 import { DeathParticle, ScoreParticle } from './render/particles';
 import {
   createPredictionState,
@@ -46,6 +46,12 @@ export const applyDelta = (localState: GameState, delta: DeltaUpdate): void => {
   }
 
   for (const id of delta.removedPlayerIds) {
+    delete localState.players[id];
+  }
+
+  // AOI exits: same local removal as a death, but callers treat them
+  // differently (no death particles).
+  for (const id of delta.despawnedPlayerIds) {
     delete localState.players[id];
   }
 
@@ -142,8 +148,6 @@ export type GameNetworkHandles = {
   disconnect: () => void;
 };
 
-const DEFAULT_WORLD_SIZE = 3000;
-
 export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandles => {
   const {
     sessionVersion,
@@ -162,7 +166,7 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
   const worldSummaryRef = useRef<WorldSummary>({
     players: [],
     foodCount: 0,
-    worldSize: DEFAULT_WORLD_SIZE,
+    worldSize: WORLD_SIZE,
   });
   const myIdRef = useRef<string | null>(null);
   const scoreParticlesRef = useRef<ScoreParticle[]>([]);
@@ -253,6 +257,9 @@ export const useGameNetwork = (options: UseGameNetworkOptions): GameNetworkHandl
       const interp = interpBufferRef.current;
       for (const removedId of delta.removedPlayerIds) {
         removeInterpPlayer(interp, removedId);
+      }
+      for (const despawnedId of delta.despawnedPlayerIds) {
+        removeInterpPlayer(interp, despawnedId);
       }
       for (const id in localState.players) {
         if (id === myId) continue;

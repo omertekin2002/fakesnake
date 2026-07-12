@@ -5,14 +5,19 @@ type ConnectionLostScreenProps = {
 };
 
 export function ConnectionLostScreen({ reason, onReconnect, onMainMenu }: ConnectionLostScreenProps) {
-  // The server rejects over-capacity handshakes with a "too many connections"
-  // error; that's a full server, not a dropped run, so say so distinctly.
-  const isFull = (reason ?? '').toLowerCase().includes('too many');
+  // The server rejects over-capacity handshakes with "Too many connections
+  // from this address" (per-IP cap) or "Server is full" (global cap); either
+  // way it's a full server, not a dropped run, so say so distinctly.
+  const normalizedReason = (reason ?? '').toLowerCase();
+  const isIpCap = normalizedReason.includes('too many');
+  const isFull = isIpCap || normalizedReason.includes('full');
 
   const title = isFull ? 'Server Full' : 'Connection Lost';
-  const message = isFull
+  const message = isIpCap
     ? 'Too many connections from your network right now. Wait a moment and try again.'
-    : "Lost contact with the server. Your snake couldn't be saved — rejoin to start a fresh run.";
+    : isFull
+      ? 'The server is at capacity right now. Wait a moment and try again.'
+      : "Lost contact with the server. Your snake couldn't be saved — rejoin to start a fresh run.";
 
   return (
     <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/72 backdrop-blur-sm">

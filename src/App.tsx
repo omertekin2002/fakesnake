@@ -5,6 +5,7 @@ import {
   SnakeAppearance,
 } from './shared/skins';
 import { ClientInput } from './shared/types';
+import { TICK_RATE } from './shared/constants';
 import { useGameNetwork } from './game/network';
 import { predictInput } from './game/prediction';
 import { INTERP_DELAY_MS, writeInterpolatedSnake } from './game/interpolation';
@@ -26,7 +27,7 @@ import { DeathScreen } from './components/DeathScreen';
 import { ConnectionLostScreen } from './components/ConnectionLostScreen';
 import { ExitButton } from './components/ExitButton';
 
-const TICK_MS = 1000 / 30;
+const TICK_MS = 1000 / TICK_RATE;
 const FOOD_PRUNE_INTERVAL = 2000;
 const FOOD_PRUNE_MARGIN = 1400;
 const CONNECT_TIMEOUT_MS = 10000;
@@ -427,15 +428,14 @@ export default function App() {
         drawSnake(ctx, player, camera, headVelocity);
       }
 
-      const now = performance.now();
-      drawScoreParticles(ctx, network.scoreParticlesRef.current, now);
-      drawDeathParticles(ctx, network.deathParticlesRef.current, now);
+      drawScoreParticles(ctx, network.scoreParticlesRef.current, nowTime);
+      drawDeathParticles(ctx, network.deathParticlesRef.current, nowTime);
 
       ctx.restore();
 
       drawScore(ctx, me.score, ws.height);
       drawPlayerCount(ctx, summary.players.length, ws.height);
-      drawLeaderboard(ctx, summary, myId, me.name, me.score, ws.width, leaderboardCache, now);
+      drawLeaderboard(ctx, summary, myId, me.name, me.score, ws.width, leaderboardCache, nowTime);
       drawMinimap(ctx, summary, myId, myHead, camera, gameState.worldSize);
 
       animationFrameId = requestAnimationFrame(render);

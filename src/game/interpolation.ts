@@ -31,8 +31,20 @@ export const recordSnapshot = (
     snapshots = [];
     buffer.set(playerId, snapshots);
   }
-  snapshots.push({ t, segments: segments.map((s) => ({ x: s.x, y: s.y })) });
-  if (snapshots.length > MAX_SNAPSHOTS) snapshots.shift();
+  // Recycle the evicted oldest snapshot (array and point objects) instead of
+  // deep-copying a fresh one — this runs for every remote snake every server
+  // tick and was the client's biggest steady-state allocation churn.
+  const recycled = snapshots.length >= MAX_SNAPSHOTS ? snapshots.shift() : undefined;
+  const snapshot = recycled ?? { t: 0, segments: [] as Vector2[] };
+  snapshot.t = t;
+  const dst = snapshot.segments;
+  while (dst.length < segments.length) dst.push({ x: 0, y: 0 });
+  if (dst.length > segments.length) dst.length = segments.length;
+  for (let i = 0; i < segments.length; i++) {
+    dst[i].x = segments[i].x;
+    dst[i].y = segments[i].y;
+  }
+  snapshots.push(snapshot);
 };
 
 export const removeInterpPlayer = (buffer: InterpBuffer, playerId: string): void => {

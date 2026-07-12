@@ -3,11 +3,16 @@ import { hueToHsl } from './colors';
 import { Camera } from './snake';
 
 const glowSpriteCache = new Map<string, HTMLCanvasElement>();
+// Food hue is random 0-359, so the key space is wide; cap the cache so a long
+// session can't accumulate thousands of small offscreen canvases.
+const GLOW_SPRITE_CACHE_LIMIT = 512;
 
 const getGlowSprite = (radius: number, color: string, glowStrength: number): HTMLCanvasElement => {
   const key = `${color}|${radius}|${glowStrength}`;
   let sprite = glowSpriteCache.get(key);
   if (sprite) return sprite;
+
+  if (glowSpriteCache.size >= GLOW_SPRITE_CACHE_LIMIT) glowSpriteCache.clear();
 
   const padding = glowStrength * 2;
   const size = (radius + padding) * 2;
